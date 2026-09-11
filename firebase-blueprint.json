@@ -1,0 +1,86 @@
+{
+  "entities": {
+    "School": {
+      "title": "School",
+      "description": "Schools under the Puskesmas supervision",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Name of the school" },
+        "address": { "type": "string", "description": "School address" },
+        "coordinatorName": { "type": "string", "description": "UKS Coordinator name" },
+        "phone": { "type": "string", "description": "Contact phone number" },
+        "type": { "type": "string", "enum": ["SD", "SMP", "SMA"], "description": "School level" }
+      },
+      "required": ["name", "type"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Student data for health screening",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string", "description": "Reference to School ID" },
+        "name": { "type": "string", "description": "Full name of the student" },
+        "gender": { "type": "string", "enum": ["L", "P"], "description": "Gender" },
+        "birthDate": { "type": "string", "format": "date", "description": "Date of birth" },
+        "class": { "type": "string", "description": "Current class/grade" },
+        "studentIdNumber": { "type": "string", "description": "NISN or local ID" }
+      },
+      "required": ["schoolId", "name", "gender", "birthDate", "class"]
+    },
+    "Screening": {
+      "title": "Health Screening",
+      "description": "Periodic health screening records",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "description": "Reference to Student ID" },
+        "schoolId": { "type": "string", "description": "Reference to School ID" },
+        "academicYear": { "type": "string", "description": "Academic year (e.g., 2024/2025)" },
+        "date": { "type": "string", "format": "date-time", "description": "Screening date" },
+        "height": { "type": "number", "description": "Height in cm" },
+        "weight": { "type": "number", "description": "Weight in kg" },
+        "bmi": { "type": "number", "description": "Body Mass Index" },
+        "visionLeft": { "type": "string", "description": "Vision result left eye" },
+        "visionRight": { "type": "string", "description": "Vision result right eye" },
+        "dentalStatus": { "type": "string", "description": "Dental health status" },
+        "bloodPressure": { "type": "string", "description": "Blood pressure reading" },
+        "notes": { "type": "string", "description": "Additional health notes" },
+        "createdBy": { "type": "string", "description": "UID of the staff who recorded" }
+      },
+      "required": ["studentId", "schoolId", "academicYear", "date", "height", "weight"]
+    },
+    "Report": {
+      "title": "UKS Report",
+      "description": "Monthly or periodic reports for Puskesmas",
+      "type": "object",
+      "properties": {
+        "schoolId": { "type": "string", "description": "Reference to School ID" },
+        "academicYear": { "type": "string", "description": "Academic year (e.g., 2024/2025)" },
+        "month": { "type": "number", "description": "Report month (1-12)" },
+        "year": { "type": "number", "description": "Report year" },
+        "entryDate": { "type": "string", "format": "date-time", "description": "Date when the report was entered/submitted" },
+        "totalStudents": { "type": "number", "description": "Total students screened" },
+        "summary": { "type": "object", "description": "Aggregated health data" },
+        "status": { "type": "string", "enum": ["draft", "submitted", "approved"], "description": "Report status" }
+      },
+      "required": ["schoolId", "academicYear", "month", "year", "entryDate", "status"]
+    }
+  },
+  "firestore": {
+    "/schools/{schoolId}": {
+      "schema": "School",
+      "description": "Collection of schools"
+    },
+    "/students/{studentId}": {
+      "schema": "Student",
+      "description": "Collection of students"
+    },
+    "/screenings/{screeningId}": {
+      "schema": "Screening",
+      "description": "Collection of health screenings"
+    },
+    "/reports/{reportId}": {
+      "schema": "Report",
+      "description": "Collection of UKS reports"
+    }
+  }
+}
