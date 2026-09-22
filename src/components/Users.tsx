@@ -344,12 +344,6 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
             </Badge>
           </div>
           <p className="text-muted-foreground font-medium">Kelola akun koordinator sekolah binaan Puskesmas.</p>
-          <p className="text-xs text-muted-foreground font-medium">
-            Catatan: akun baru dibuat server-side (Edge Function) tanpa keluar
-            dari sesi admin; kata sandi bisa direset admin saat ubah akun
-            (kosongkan jika tidak diubah); hapus akun juga via Edge Function
-            sehingga login ikut terhapus.
-          </p>
         </div>
         <Dialog open={isOpen} onOpenChange={(open) => { setIsOpen(open); if (!open) resetForm(); }}>
           <DialogTrigger asChild>

@@ -133,10 +133,6 @@ export function Auth({ onLogin }: AuthProps) {
               </p>
               <div className="h-px w-8 bg-slate-200" />
             </div>
-            <p className="text-center text-xs text-slate-400 font-medium leading-relaxed">
-              Akun admin dibuat via Dashboard Supabase (lihat <span className="font-bold text-slate-500">supabase/README.md</span>)<br />
-              Akun koordinator: <span className="font-bold text-slate-500">koor_sdn01 / koor_smpn01</span> via menu Kelola Pengguna
-            </p>
           </form>
           
           <div className="pt-6 border-t border-slate-100 flex flex-col gap-4">
