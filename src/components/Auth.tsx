@@ -1,13 +1,65 @@
+import { useState, type FormEvent } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ClipboardCheck, BookOpen, Pencil, GraduationCap, School, Backpack } from 'lucide-react';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { BookOpen, Pencil, GraduationCap, School, Backpack } from 'lucide-react';
 import { AuthLogosBanner } from '@/components/HeaderLogos';
+import logoBestieSehat from '@/assets/images/logo-bestiesehat.png';
+import { toast } from 'sonner';
+import type { User } from '@/types';
+import { saveSession } from '@/lib/storage';
+import { supabase, emailForUsername, profileToUser, type ProfileRow } from '@/lib/supabase';
 
 interface AuthProps {
-  onLogin: () => void;
+  onLogin: (user: User) => void;
 }
 
 export function Auth({ onLogin }: AuthProps) {
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    const trimmedUsername = username.trim();
+    if (trimmedUsername === '' || password === '') {
+      toast.error('Masukkan username dan password');
+      return;
+    }
+    setIsLoading(true);
+    try {
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: emailForUsername(trimmedUsername),
+        password,
+      });
+      if (signInError || !signInData.user) {
+        toast.error('Username atau password salah');
+        return;
+      }
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, username, name, role, school_id, is_active')
+        .eq('id', signInData.user.id)
+        .single();
+      if (profileError || !profile) {
+        await supabase.auth.signOut();
+        toast.error('Profil pengguna tidak ditemukan. Hubungi admin Puskesmas.');
+        return;
+      }
+      if (profile.is_active === false) {
+        await supabase.auth.signOut();
+        toast.error('Akun Anda nonaktif. Hubungi admin Puskesmas.');
+        return;
+      }
+      const user = profileToUser(profile as ProfileRow);
+      saveSession(user);
+      toast.success(`Selamat datang, ${user.name}`);
+      onLogin(user);
+    } finally {
+      setIsLoading(false);
+    }
+  };
   return (
     <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-primary/10 via-background to-secondary/20 p-4 relative overflow-hidden">
       {/* School Themed Decorations */}
@@ -37,9 +89,7 @@ export function Auth({ onLogin }: AuthProps) {
 
         <CardHeader className="text-center pt-6 pb-4">
           <div className="flex justify-center mb-4">
-            <div className="p-5 bg-primary rounded-[2rem] shadow-2xl shadow-primary/40 animate-bounce-subtle">
-              <ClipboardCheck className="w-14 h-14 text-primary-foreground" />
-            </div>
+            <img src={logoBestieSehat} alt="Logo Bestie Sehat" className="w-28 h-28 object-contain drop-shadow-xl animate-bounce-subtle" />
           </div>
           <CardTitle className="text-4xl font-black tracking-tight text-primary">UKS Digital</CardTitle>
           <CardDescription className="text-lg font-bold text-slate-600 mt-2 leading-tight">
@@ -49,9 +99,32 @@ export function Auth({ onLogin }: AuthProps) {
         </CardHeader>
 
         <CardContent className="space-y-8 px-10 pb-14">
-          <div className="space-y-4">
-            <Button className="w-full h-16 text-xl font-black rounded-2xl shadow-xl shadow-primary/30 hover:scale-[1.02] transition-all active:scale-95 bg-primary hover:bg-primary/90" onClick={onLogin}>
-              Masuk dengan Google
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-2 text-left">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                id="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="Masukkan username"
+                autoComplete="username"
+                className="h-12 rounded-xl"
+              />
+            </div>
+            <div className="space-y-2 text-left">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Masukkan password"
+                autoComplete="current-password"
+                className="h-12 rounded-xl"
+              />
+            </div>
+            <Button type="submit" disabled={isLoading} className="w-full h-14 text-lg font-black rounded-2xl shadow-xl shadow-primary/30 hover:scale-[1.02] transition-all active:scale-95 bg-primary hover:bg-primary/90">
+              {isLoading ? 'Memeriksa...' : 'Masuk'}
             </Button>
             <div className="flex items-center justify-center gap-2 text-slate-400">
               <div className="h-px w-8 bg-slate-200" />
@@ -60,7 +133,11 @@ export function Auth({ onLogin }: AuthProps) {
               </p>
               <div className="h-px w-8 bg-slate-200" />
             </div>
-          </div>
+            <p className="text-center text-xs text-slate-400 font-medium leading-relaxed">
+              Akun admin dibuat via Dashboard Supabase (lihat <span className="font-bold text-slate-500">supabase/README.md</span>)<br />
+              Akun koordinator: <span className="font-bold text-slate-500">koor_sdn01 / koor_smpn01</span> via menu Kelola Pengguna
+            </p>
+          </form>
           
           <div className="pt-6 border-t border-slate-100 flex flex-col gap-4">
             <div className="flex items-start gap-3 p-4 bg-slate-50 rounded-2xl border border-slate-100">

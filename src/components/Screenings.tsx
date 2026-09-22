@@ -1,5 +1,5 @@
-import React, { useState, useMemo, useRef } from 'react';
-import { Plus, Search, Calendar as CalendarIcon, Activity, Eye, Heart, Brain, Baby, ShieldAlert, FileText, Upload, Download, FileSpreadsheet, ExternalLink, CheckCircle2, Clock, XCircle, Trash2 } from 'lucide-react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { Plus, Search, Calendar as CalendarIcon, Activity, Eye, Heart, Brain, Baby, ShieldAlert, FileText, Upload, Download, FileSpreadsheet, ExternalLink, CheckCircle2, Clock, XCircle, Trash2, Edit } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
   Table, 
@@ -29,44 +29,343 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Screening, Student, School } from '@/types';
+import { Screening, Student, School, User } from '@/types';
 import { toast } from 'sonner';
-import { getStudents, getSchools, getScreenings, saveScreenings } from '@/lib/storage';
+import { supabase } from '@/lib/supabase';
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
 import { calculateAgeDetails } from '@/lib/ageUtils';
 
 interface ScreeningsProps {
   academicYear: string;
+  currentUser?: User;
 }
 
-export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProps) {
-  const [screenings, setScreenings] = useState<Screening[]>(() => getScreenings());
-  const [students, setStudents] = useState<Student[]>(() => getStudents());
-  const [schools, setSchools] = useState<School[]>(() => getSchools());
+interface ScreeningRow {
+  id: string;
+  student_id: string;
+  school_id: string;
+  academic_year: string;
+  date: string;
+  entry_date: string | null;
+  student_class: string | null;
+  student_gender: 'L' | 'P' | null;
+  height: number | null;
+  weight: number | null;
+  bmi: number | null;
+  physical_activity: string | null;
+  vision_left: string | null;
+  vision_right: string | null;
+  hearing_left: string | null;
+  hearing_right: string | null;
+  dental_caries: string | null;
+  dental_mouth_health: string | null;
+  blood_pressure: string | null;
+  blood_sugar: string | null;
+  tbc_screening: string | null;
+  hepatitis_b: string | null;
+  hepatitis_c: string | null;
+  mental_health_status: string | null;
+  reproductive_health: string | null;
+  smoking_status: string | null;
+  immunization_history: string | null;
+  anemia_status: string | null;
+  hb_level: number | null;
+  hb_interpretation: string | null;
+  notes: string | null;
+  created_by: string | null;
+  needs_referral: boolean;
+  referral_destination: string | null;
+  referral_reason: string | null;
+  referral_status: 'pending' | 'completed' | 'cancelled' | null;
+}
+
+interface StudentRow {
+  id: string;
+  school_id: string;
+  name: string;
+  gender: 'L' | 'P';
+  birth_date: string;
+  class: string;
+  nik: string;
+  parent_name: string;
+  whatsapp: string;
+  address: Student['address'];
+  student_id_number: string | null;
+}
+
+interface SchoolRow {
+  id: string;
+  name: string;
+  address: string;
+  coordinator_name: string;
+  phone: string;
+  type: School['type'];
+}
+
+const SCREENING_SELECT =
+  'id, student_id, school_id, academic_year, date, entry_date, student_class, student_gender, height, weight, bmi, physical_activity, vision_left, vision_right, hearing_left, hearing_right, dental_caries, dental_mouth_health, blood_pressure, blood_sugar, tbc_screening, hepatitis_b, hepatitis_c, mental_health_status, reproductive_health, smoking_status, immunization_history, anemia_status, hb_level, hb_interpretation, notes, created_by, needs_referral, referral_destination, referral_reason, referral_status';
+
+// Satu-satunya titik pemetaan snake_case (screenings/students/schools) <->
+// camelCase (Screening/Student/School), mirror TTDCompliance.tsx.
+function screeningRowToModel(row: ScreeningRow): Screening {
+  return {
+    id: row.id,
+    studentId: row.student_id,
+    schoolId: row.school_id,
+    academicYear: row.academic_year,
+    date: row.date,
+    entryDate: row.entry_date ?? '',
+    studentClass: row.student_class ?? undefined,
+    studentGender: row.student_gender ?? undefined,
+    height: row.height ?? 0,
+    weight: row.weight ?? 0,
+    bmi: row.bmi ?? 0,
+    physicalActivity: row.physical_activity ?? undefined,
+    visionLeft: row.vision_left ?? undefined,
+    visionRight: row.vision_right ?? undefined,
+    hearingLeft: row.hearing_left ?? undefined,
+    hearingRight: row.hearing_right ?? undefined,
+    dentalCaries: row.dental_caries ?? undefined,
+    dentalMouthHealth: row.dental_mouth_health ?? undefined,
+    bloodPressure: row.blood_pressure ?? undefined,
+    bloodSugar: row.blood_sugar ?? undefined,
+    tbcScreening: row.tbc_screening ?? undefined,
+    hepatitisB: row.hepatitis_b ?? undefined,
+    hepatitisC: row.hepatitis_c ?? undefined,
+    mentalHealthStatus: row.mental_health_status ?? undefined,
+    reproductiveHealth: row.reproductive_health ?? undefined,
+    smokingStatus: row.smoking_status ?? undefined,
+    immunizationHistory: row.immunization_history ?? undefined,
+    anemiaStatus: row.anemia_status ?? undefined,
+    hbLevel: row.hb_level ?? undefined,
+    hbInterpretation: row.hb_interpretation ?? undefined,
+    notes: row.notes ?? undefined,
+    createdBy: row.created_by ?? '',
+    needsReferral: row.needs_referral,
+    referralDestination: row.referral_destination ?? undefined,
+    referralReason: row.referral_reason ?? undefined,
+    referralStatus: row.referral_status ?? undefined,
+  };
+}
+
+function screeningToInsert(s: {
+  studentId: string;
+  schoolId: string;
+  academicYear: string;
+  date: string;
+  entryDate: string;
+  studentClass?: string;
+  studentGender?: 'L' | 'P';
+  height: number;
+  weight: number;
+  bmi: number;
+  physicalActivity?: string;
+  visionLeft?: string;
+  visionRight?: string;
+  hearingLeft?: string;
+  hearingRight?: string;
+  dentalCaries?: string;
+  dentalMouthHealth?: string;
+  bloodPressure?: string;
+  bloodSugar?: string;
+  tbcScreening?: string;
+  hepatitisB?: string;
+  hepatitisC?: string;
+  mentalHealthStatus?: string;
+  reproductiveHealth?: string;
+  smokingStatus?: string;
+  immunizationHistory?: string;
+  anemiaStatus?: string;
+  hbLevel?: number;
+  hbInterpretation?: string;
+  notes?: string;
+  createdBy: string | null;
+  needsReferral?: boolean;
+  referralDestination?: string;
+  referralReason?: string;
+  referralStatus?: 'pending' | 'completed' | 'cancelled';
+}) {
+  return {
+    student_id: s.studentId,
+    school_id: s.schoolId,
+    academic_year: s.academicYear,
+    date: s.date.slice(0, 10),
+    entry_date: s.entryDate.slice(0, 10),
+    student_class: s.studentClass ?? null,
+    student_gender: s.studentGender ?? null,
+    height: s.height,
+    weight: s.weight,
+    bmi: s.bmi,
+    physical_activity: s.physicalActivity ?? null,
+    vision_left: s.visionLeft ?? null,
+    vision_right: s.visionRight ?? null,
+    hearing_left: s.hearingLeft ?? null,
+    hearing_right: s.hearingRight ?? null,
+    dental_caries: s.dentalCaries ?? null,
+    dental_mouth_health: s.dentalMouthHealth ?? null,
+    blood_pressure: s.bloodPressure ?? null,
+    blood_sugar: s.bloodSugar ?? null,
+    tbc_screening: s.tbcScreening ?? null,
+    hepatitis_b: s.hepatitisB ?? null,
+    hepatitis_c: s.hepatitisC ?? null,
+    mental_health_status: s.mentalHealthStatus ?? null,
+    reproductive_health: s.reproductiveHealth ?? null,
+    smoking_status: s.smokingStatus ?? null,
+    immunization_history: s.immunizationHistory ?? null,
+    anemia_status: s.anemiaStatus ?? null,
+    hb_level: s.hbLevel ?? null,
+    hb_interpretation: s.hbInterpretation ?? null,
+    notes: s.notes ?? null,
+    created_by: s.createdBy,
+    needs_referral: s.needsReferral ?? false,
+    referral_destination: s.referralDestination ?? null,
+    referral_reason: s.referralReason ?? null,
+    referral_status: s.referralStatus ?? null,
+  };
+}
+
+// Sel tanggal Excel bisa berupa serial number, string YYYY-MM-DD, atau Date.
+// Selalu normalkan ke ISO YYYY-MM-DD agar round-trip export<->import stabil.
+function excelCellToISODate(cell: unknown): string {
+  if (cell === null || cell === undefined || cell === '') return '';
+  if (typeof cell === 'number' && Number.isFinite(cell)) {
+    const parsed = XLSX.SSF.parse_date_code(cell);
+    if (parsed) {
+      const mm = String(parsed.m).padStart(2, '0');
+      const dd = String(parsed.d).padStart(2, '0');
+      return `${parsed.y}-${mm}-${dd}`;
+    }
+    return '';
+  }
+  const raw = cell.toString().trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return raw;
+}
+
+// Angka impor XLSX wajib valid: sel kosong/null/undefined atau non-numerik
+// mengembalikan null agar baris dilewati (tidak pernah `|| 0` menjadi vital hantu).
+function parseStrictNumber(cell: unknown): number | null {
+  if (cell === null || cell === undefined) return null;
+  const raw = cell.toString().trim();
+  if (raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function studentRowToStudent(row: StudentRow): Student {
+  return {
+    id: row.id,
+    schoolId: row.school_id,
+    name: row.name,
+    gender: row.gender,
+    birthDate: row.birth_date ?? '',
+    age: 0,
+    class: row.class,
+    nik: row.nik,
+    parentName: row.parent_name,
+    whatsapp: row.whatsapp,
+    address: row.address ?? { rt: '', rw: '', desa: '', kecamatan: '', kabupaten: '', provinsi: '' },
+    studentIdNumber: row.student_id_number ?? '',
+  };
+}
+
+function schoolRowToSchool(row: SchoolRow): School {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address,
+    coordinatorName: row.coordinator_name,
+    phone: row.phone,
+    type: row.type,
+  };
+}
+
+export function Screenings({ academicYear: currentAcademicYear, currentUser }: ScreeningsProps) {
+  const [screenings, setScreenings] = useState<Screening[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [schools, setSchools] = useState<School[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
   const [isOpen, setIsOpen] = useState(false);
   const [selectedScreening, setSelectedScreening] = useState<any | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const loadData = async () => {
+    const [screeningRes, studentRes, schoolRes] = await Promise.all([
+      supabase.from('screenings').select(SCREENING_SELECT),
+      supabase.from('students').select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number'),
+      supabase.from('schools').select('id, name, address, coordinator_name, phone, type'),
+    ]);
+    if (screeningRes.error || studentRes.error || schoolRes.error || !screeningRes.data || !studentRes.data || !schoolRes.data) {
+      toast.error('Gagal memuat data pemeriksaan. Periksa koneksi dan coba lagi.');
+      setScreenings([]);
+      setStudents([]);
+      setSchools([]);
+      return;
+    }
+    setScreenings((screeningRes.data as ScreeningRow[]).map(screeningRowToModel));
+    setStudents((studentRes.data as StudentRow[]).map(studentRowToStudent));
+    setSchools((schoolRes.data as SchoolRow[]).map(schoolRowToSchool));
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      await loadData();
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const isKoordinator = currentUser?.role === 'koordinator';
+  const scopedSchoolId = isKoordinator ? currentUser?.schoolId : undefined;
+
+  // Pagination: filter dulu (scope koordinator + tahun + search), baru slice.
+  // Reset ke halaman 1 setiap input filter/scope/tahun berubah.
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, currentAcademicYear, scopedSchoolId]);
+
   const resolvedScreenings = useMemo(() => {
-    return screenings.map(s => {
-      const student = students.find(st => st.id === s.studentId);
-      const school = schools.find(sch => sch.id === (s.schoolId || student?.schoolId));
-      return {
-        ...s,
-        studentName: student ? student.name : 'Unknown Student',
-        schoolName: school ? school.name : 'Unknown School',
+    return screenings
+      .map(s => {
+        const student = students.find(st => st.id === s.studentId);
+        const school = schools.find(sch => sch.id === (s.schoolId || student?.schoolId));
+        return {
+          ...s,
+          studentName: student ? student.name : 'Unknown Student',
+          schoolName: school ? school.name : 'Unknown School',
         schoolType: school ? school.type : 'SD' as 'SD' | 'SMP' | 'SMA',
         studentClass: s.studentClass || student?.class || '1',
         studentGender: s.studentGender || student?.gender || 'L',
       };
-    });
-  }, [screenings, students, schools]);
+      })
+      .filter((s) => {
+        if (!scopedSchoolId) return true;
+        if (s.schoolId) return s.schoolId === scopedSchoolId;
+        const student = students.find((st) => st.id === s.studentId);
+        return student?.schoolId === scopedSchoolId;
+      });
+  }, [screenings, students, schools, scopedSchoolId]);
   
   // Form state
   const [schoolId, setSchoolId] = useState('');
   const [studentId, setStudentId] = useState('');
+  const [studentQuery, setStudentQuery] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   
   // Status Gizi
@@ -124,6 +423,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
 
   // Reset student when school changes
   const handleSchoolChange = (id: string) => {
+    if (isKoordinator) return;
     setSchoolId(id);
     setStudentId(''); // Reset student selection
   };
@@ -155,21 +455,89 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
 
   const hbInterpretation = getHbInterpretation(Number(hbLevel));
 
-  const handleSaveScreening = () => {
-    if (!schoolId || !studentId || !height || !weight) {
+  const resetForm = () => {
+    setEditingId(null);
+    setSchoolId('');
+    setStudentId('');
+    setStudentQuery('');
+    setDate(new Date().toISOString().split('T')[0]);
+    setHeight('');
+    setWeight('');
+    setPhysicalActivity('Aktif');
+    setVisionLeft('Normal');
+    setVisionRight('Normal');
+    setHearingLeft('Normal');
+    setHearingRight('Normal');
+    setDentalCaries('Tidak Ada');
+    setDentalMouthHealth('Sehat');
+    setBloodPressure('110/70');
+    setBloodSugar('90');
+    setTbcScreening('Negatif');
+    setHepatitisB('Negatif');
+    setHepatitisC('Negatif');
+    setMentalHealthStatus('Stabil');
+    setReproductiveHealth('Sehat');
+    setSmokingStatus('Tidak Merokok');
+    setImmunizationHistory('Lengkap');
+    setAnemiaStatus('Normal');
+    setHbLevel('');
+    setNotes('');
+    setNeedsReferral('Tidak');
+    setReferralDestination('Puskesmas');
+    setReferralReason('');
+    setReferralStatus('pending');
+  };
+
+  const handleEditScreening = (screening: any) => {
+    const student = students.find((st) => st.id === screening.studentId);
+    setEditingId(screening.id);
+    setSchoolId(screening.schoolId || student?.schoolId || '');
+    setStudentId(screening.studentId || '');
+    setStudentQuery('');
+    setDate(screening.date ? new Date(screening.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+    setHeight(String(screening.height ?? ''));
+    setWeight(String(screening.weight ?? ''));
+    setPhysicalActivity(screening.physicalActivity || 'Aktif');
+    setVisionLeft(screening.visionLeft || 'Normal');
+    setVisionRight(screening.visionRight || 'Normal');
+    setHearingLeft(screening.hearingLeft || 'Normal');
+    setHearingRight(screening.hearingRight || 'Normal');
+    setDentalCaries(screening.dentalCaries || 'Tidak Ada');
+    setDentalMouthHealth(screening.dentalMouthHealth || 'Sehat');
+    setBloodPressure(screening.bloodPressure || '110/70');
+    setBloodSugar(screening.bloodSugar || '90');
+    setTbcScreening(screening.tbcScreening || 'Negatif');
+    setHepatitisB(screening.hepatitisB || 'Negatif');
+    setHepatitisC(screening.hepatitisC || 'Negatif');
+    setMentalHealthStatus(screening.mentalHealthStatus || 'Stabil');
+    setReproductiveHealth(screening.reproductiveHealth || 'Sehat');
+    setSmokingStatus(screening.smokingStatus || 'Tidak Merokok');
+    setImmunizationHistory(screening.immunizationHistory || 'Lengkap');
+    setAnemiaStatus(screening.anemiaStatus || 'Normal');
+    setHbLevel(screening.hbLevel !== undefined && screening.hbLevel !== null ? String(screening.hbLevel) : '');
+    setNotes(screening.notes || '');
+    setNeedsReferral(screening.needsReferral ? 'Ya' : 'Tidak');
+    setReferralDestination(screening.referralDestination || 'Puskesmas');
+    setReferralReason(screening.referralReason || '');
+    setReferralStatus(screening.referralStatus || 'pending');
+    setIsOpen(true);
+  };
+
+  const handleSaveScreening = async () => {
+    if (isSaving) return;
+    const effectiveSchoolId = scopedSchoolId ?? schoolId;
+    if (!effectiveSchoolId || !studentId || !height || !weight) {
       toast.error("Mohon lengkapi data pemeriksaan utama (Sekolah, Siswa, TB, BB)");
       return;
     }
 
-    const newScreening: Screening = {
-      id: Math.random().toString(36).substr(2, 9),
+    const record: Omit<Screening, 'id' | 'entryDate' | 'createdBy' | 'academicYear'> & { academicYear: string } = {
       studentId,
-      schoolId,
+      schoolId: effectiveSchoolId,
       academicYear: currentAcademicYear,
       studentClass,
       studentGender,
       date: new Date(date).toISOString(),
-      entryDate: new Date().toISOString(),
       height: Number(height),
       weight: Number(weight),
       bmi: calculatedBmi,
@@ -193,43 +561,145 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
       hbLevel: hbLevel ? Number(hbLevel) : undefined,
       hbInterpretation: hbLevel ? hbInterpretation : undefined,
       notes,
-      createdBy: 'admin',
       needsReferral: needsReferral === 'Ya',
       referralDestination: needsReferral === 'Ya' ? referralDestination : undefined,
       referralReason: needsReferral === 'Ya' ? referralReason : undefined,
       referralStatus: needsReferral === 'Ya' ? referralStatus : undefined,
     };
 
-    const updated = [newScreening, ...screenings];
-    setScreenings(updated);
-    saveScreenings(updated);
-    toast.success("Hasil pemeriksaan berhasil disimpan");
-    
-    // Reset form
-    setNotes('');
-    setNeedsReferral('Tidak');
-    setReferralDestination('Puskesmas');
-    setReferralReason('');
-    setReferralStatus('pending');
-    setIsOpen(false);
+    setIsSaving(true);
+    try {
+      if (editingId) {
+        const { data, error } = await supabase
+          .from('screenings')
+          .update(screeningToInsert({ ...record, entryDate: new Date().toISOString(), createdBy: null }))
+          .eq('id', editingId)
+          .select(SCREENING_SELECT)
+          .single();
+        if (error || !data) {
+          toast.error('Gagal memperbarui hasil pemeriksaan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const updatedScreening = screeningRowToModel(data as ScreeningRow);
+        setScreenings((prev) => prev.map((s) => (s.id === editingId ? updatedScreening : s)));
+        toast.success("Hasil pemeriksaan berhasil diperbarui");
+      } else {
+        const screeningDay = record.date.slice(0, 10);
+        const { data: dupHit, error: dupError } = await supabase
+          .from('screenings')
+          .select('id')
+          .eq('student_id', record.studentId)
+          .eq('date', screeningDay)
+          .limit(1);
+        if (dupError) {
+          toast.error('Gagal memeriksa duplikat pemeriksaan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        if (dupHit && dupHit.length > 0) {
+          toast.info('Pemeriksaan siswa ini pada tanggal tersebut sudah tercatat.');
+          return;
+        }
+        const createdBy = (await supabase.auth.getUser()).data.user?.id ?? null;
+        const { data, error } = await supabase
+          .from('screenings')
+          .insert(screeningToInsert({ ...record, entryDate: new Date().toISOString(), createdBy }))
+          .select(SCREENING_SELECT)
+          .single();
+        if (error || !data) {
+          toast.error('Gagal menyimpan hasil pemeriksaan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const newScreening = screeningRowToModel(data as ScreeningRow);
+        setScreenings((prev) => [newScreening, ...prev]);
+        toast.success("Hasil pemeriksaan berhasil disimpan");
+      }
+    } finally {
+      setIsSaving(false);
+      // Reset form
+      resetForm();
+      setIsOpen(false);
+    }
   };
 
-  const handleDeleteScreening = (id: string) => {
-    const updated = screenings.filter(s => s.id !== id);
-    setScreenings(updated);
-    saveScreenings(updated);
+  const handleDeleteScreening = async (id: string) => {
+    setIsDeleting(true);
+    try {
+    const { error } = await supabase.from('screenings').delete().eq('id', id);
+    if (error) {
+      toast.error('Gagal menghapus hasil pemeriksaan. Coba lagi.');
+      return;
+    }
+    setScreenings((prev) => prev.filter((s) => s.id !== id));
     toast.success("Hasil pemeriksaan berhasil dihapus");
+    } finally {
+      setIsDeleting(false);
+      setDeleteTargetId(null);
+    }
   };
+
+  const deleteTargetLabel = (() => {
+    if (!deleteTargetId) return '';
+    const found = resolvedScreenings.find((s) => s.id === deleteTargetId);
+    if (!found) return deleteTargetId;
+    const dateStr = found.date ? new Date(found.date).toLocaleDateString('id-ID') : '';
+    return `${found.studentName}${dateStr ? ` — ${dateStr}` : ''}`;
+  })();
 
   const handleViewDetail = (screening: any) => {
     setSelectedScreening(screening);
     setIsDetailOpen(true);
   };
 
-  const filteredScreenings = resolvedScreenings.filter(s => 
-    s.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    s.schoolName.toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredScreenings = resolvedScreenings.filter(s =>
+    (!s.academicYear || s.academicYear === currentAcademicYear) &&
+    (s.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    s.schoolName.toLowerCase().includes(searchTerm.toLowerCase()))
   );
+
+  const totalCount = filteredScreenings.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  const pageStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+  const pageEnd = Math.min(safePage * PAGE_SIZE, totalCount);
+  const pagedScreenings = filteredScreenings.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  const handleExport = () => {
+    // Kolom persis mirror kunci templateData downloadTemplate agar
+    // export->import round-trip (siswa dikenali lagi via NIK/nama).
+    const dataToExport = filteredScreenings.map((s) => ({
+      'NIK Siswa': students.find((st) => st.id === s.studentId)?.nik ?? '',
+      'Nama Siswa': s.studentName,
+      'Tanggal (YYYY-MM-DD)': s.date ? s.date.slice(0, 10) : '',
+      'Tinggi Badan (cm)': s.height,
+      'Berat Badan (kg)': s.weight,
+      'Tekanan Darah': s.bloodPressure ?? '',
+      'Gula Darah': s.bloodSugar ?? '',
+      'Kadar HB': s.hbLevel ?? '',
+      'Visi Kiri': s.visionLeft ?? '',
+      'Visi Kanan': s.visionRight ?? '',
+      'Pendengaran Kiri': s.hearingLeft ?? '',
+      'Pendengaran Kanan': s.hearingRight ?? '',
+      'Karies Gigi': s.dentalCaries ?? '',
+      'Kesehatan Mulut': s.dentalMouthHealth ?? '',
+      'Skrining TBC': s.tbcScreening ?? '',
+      'Hepatitis B': s.hepatitisB ?? '',
+      'Hepatitis C': s.hepatitisC ?? '',
+      'Kesehatan Mental': s.mentalHealthStatus ?? '',
+      'Kesehatan Reproduksi': s.reproductiveHealth ?? '',
+      'Merokok': s.smokingStatus ?? '',
+      'Aktivitas Fisik': s.physicalActivity ?? '',
+      'Riwayat Imunisasi': s.immunizationHistory ?? '',
+      'Perlu Rujukan (Ya/Tidak)': s.needsReferral ? 'Ya' : 'Tidak',
+      'Tujuan Rujukan': s.referralDestination ?? '',
+      'Alasan Rujukan': s.referralReason ?? '',
+      'Catatan': s.notes ?? '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(dataToExport);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Data Pemeriksaan");
+    XLSX.writeFile(wb, `data-pemeriksaan-${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast.success(`Berhasil mengekspor ${dataToExport.length} data pemeriksaan`);
+  };
 
   const downloadTemplate = () => {
     const templateData = [
@@ -274,7 +744,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = async (evt) => {
       try {
         const bstr = evt.target?.result;
         const wb = XLSX.read(bstr, { type: 'binary' });
@@ -288,8 +758,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
         }
 
         const newRecords: any[] = [];
-        let successCount = 0;
-        let errorCount = 0;
+        const skippedRows: string[] = [];
 
         data.forEach((row, index) => {
           // Find student by NIK or Name
@@ -298,32 +767,34 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
           const student = students.find(s => (nik && s.nik === nik) || (name && s.name.toLowerCase() === name.toLowerCase()));
 
           if (!student) {
-            console.error(`Baris ${index + 1}: Siswa tidak ditemukan (${name || nik})`);
-            errorCount++;
+            skippedRows.push(`Baris ${index + 1}: Siswa tidak ditemukan (${name || nik || 'tanpa identitas'})`);
             return;
           }
 
-          const h = Number(row['Tinggi Badan (cm)']);
-          const w = Number(row['Berat Badan (kg)']);
-          const hb = Number(row['Kadar HB']);
-          
+          const h = parseStrictNumber(row['Tinggi Badan (cm)']);
+          const w = parseStrictNumber(row['Berat Badan (kg)']);
+          const hb = parseStrictNumber(row['Kadar HB']);
+          if (h === null || w === null || h <= 0 || w <= 0) {
+            skippedRows.push(`Baris ${index + 1}: Tinggi/Berat Badan kosong atau tidak valid`);
+            return;
+          }
+
           const calculatedBmiValue = bmi(h, w);
-          const hbInterp = getHbInterpretation(hb);
+          const hbInterp = hb === null ? '-' : getHbInterpretation(hb);
 
           const record = {
-            id: Math.random().toString(36).substr(2, 9),
             studentId: student.id,
             schoolId: student.schoolId,
             academicYear: currentAcademicYear,
             studentName: student.name,
-            schoolName: student.schoolId === '1' ? 'SDN 01 Kota' : student.schoolId === '2' ? 'SMPN 01 Kota' : 'SMAN 01 Kota',
-            schoolType: (student.schoolId === '1' ? 'SD' : student.schoolId === '2' ? 'SMP' : 'SMA') as 'SD' | 'SMP' | 'SMA',
+            schoolName: schools.find((sch) => sch.id === student.schoolId)?.name ?? 'Unknown School',
+            schoolType: (schools.find((sch) => sch.id === student.schoolId)?.type ?? 'SD') as 'SD' | 'SMP' | 'SMA',
             studentClass: student.class,
             studentGender: student.gender,
-            date: row['Tanggal (YYYY-MM-DD)'] ? new Date(row['Tanggal (YYYY-MM-DD)']).toISOString() : new Date().toISOString(),
+            date: excelCellToISODate(row['Tanggal (YYYY-MM-DD)']) || new Date().toISOString().slice(0, 10),
             entryDate: new Date().toISOString(),
-            height: h || 0,
-            weight: w || 0,
+            height: h,
+            weight: w,
             bmi: calculatedBmiValue,
             physicalActivity: row['Aktivitas Fisik'] || 'Aktif',
             visionLeft: row['Visi Kiri'] || 'Normal',
@@ -342,10 +813,10 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
             smokingStatus: row['Merokok'] || 'Tidak Merokok',
             immunizationHistory: row['Riwayat Imunisasi'] || 'Lengkap',
             anemiaStatus: hbInterp === 'Normal' ? 'Normal' : 'Anemia',
-            hbLevel: hb || undefined,
-            hbInterpretation: hb ? hbInterp : undefined,
+            hbLevel: hb === null ? undefined : hb,
+            hbInterpretation: hb === null ? undefined : hbInterp,
             notes: row['Catatan'] || '',
-            createdBy: 'admin',
+            createdBy: currentUser?.username ?? 'admin',
             needsReferral: row['Perlu Rujukan (Ya/Tidak)'] === 'Ya',
             referralDestination: row['Tujuan Rujukan'] || undefined,
             referralReason: row['Alasan Rujukan'] || undefined,
@@ -353,23 +824,46 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
           };
 
           newRecords.push(record);
-          successCount++;
         });
 
         if (newRecords.length > 0) {
-          setScreenings(prev => {
-            const updated = [...newRecords, ...prev];
-            saveScreenings(updated);
-            return updated;
+          // Paksa scope koordinator server-side: baris sekolah lain dilewati.
+          const scopedRecords = scopedSchoolId
+            ? newRecords.filter((r) => r.schoolId === scopedSchoolId)
+            : newRecords;
+          const scopeSkipped = newRecords.length - scopedRecords.length;
+          const skippedSummary = scopeSkipped > 0
+            ? [`${scopeSkipped} baris dilewati (di luar sekolah Anda)`, ...skippedRows]
+            : skippedRows;
+          if (skippedSummary.length > 0) {
+            toast.error(`${skippedSummary.length} baris dilewati: ${skippedSummary.join('; ')}`);
+          }
+          if (scopedRecords.length === 0) {
+            toast.error("Tidak ada data valid untuk sekolah Anda");
+            return;
+          }
+          const createdBy = (await supabase.auth.getUser()).data.user?.id ?? null;
+          const { error } = await supabase.from('screenings').insert(
+            scopedRecords.map((r) => screeningToInsert({ ...r, entryDate: new Date().toISOString(), createdBy }))
+          );
+          if (error) {
+            toast.error('Gagal mengimpor data. Periksa koneksi dan coba lagi.');
+            return;
+          }
+          await loadData();
+          toast.success(`Berhasil mengimpor ${scopedRecords.length} data pemeriksaan.`, {
+            description: skippedSummary.length > 0 ? `${skippedSummary.length} baris dilewati. TA ${currentAcademicYear}.` : `Data telah ditambahkan untuk TA ${currentAcademicYear}.`
           });
-          toast.success(`Berhasil mengimpor ${successCount} data. ${errorCount > 0 ? `${errorCount} data gagal.` : ''}`);
           setIsImportOpen(false);
         } else {
-          toast.error("Tidak ada data valid yang dapat diimpor");
+          if (skippedRows.length > 0) {
+            toast.error(`${skippedRows.length} baris dilewati: ${skippedRows.join('; ')}`);
+          } else {
+            toast.error("Tidak ada data valid yang dapat diimpor");
+          }
         }
-      } catch (err) {
-        console.error(err);
-        toast.error("Gagal memproses file. Pastikan format sesuai.");
+      } catch {
+        toast.error("File tak terbaca. Pastikan format sesuai template.");
       }
     };
     reader.readAsBinaryString(file);
@@ -390,11 +884,11 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
           </div>
           <p className="text-muted-foreground font-medium">Catat dan pantau hasil pemeriksaan berkala siswa.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex gap-2">
           <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
             <DialogTrigger asChild>
-              <Button variant="outline" className="gap-2 h-11 px-6 rounded-xl border-primary/20 hover:bg-primary/5 text-primary">
-                <Upload className="w-5 h-5" /> Import Data
+              <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200 hover:bg-primary/5 hover:text-primary transition-all">
+                <Upload className="w-4 h-4" /> Import Excel
               </Button>
             </DialogTrigger>
             <DialogContent className="max-w-md rounded-3xl border-none shadow-2xl">
@@ -433,16 +927,19 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
               </div>
             </DialogContent>
           </Dialog>
+          <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200" onClick={handleExport}>
+            <Download className="w-4 h-4" /> Export
+          </Button>
 
-          <Dialog open={isOpen} onOpenChange={setIsOpen}>
+          <Dialog open={isOpen} onOpenChange={(open) => { if (!open) setStudentQuery(''); setIsOpen(open); }}>
             <DialogTrigger asChild>
-              <Button className="gap-2 shadow-lg shadow-primary/20 h-11 px-6 rounded-xl">
-                <Plus className="w-5 h-5" /> Catat Pemeriksaan
+              <Button className="gap-2 h-11 px-6 rounded-xl shadow-lg shadow-primary/20" onClick={() => resetForm()}>
+                <Plus className="w-4 h-4" /> Catat Pemeriksaan
               </Button>
             </DialogTrigger>
           <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
             <DialogHeader>
-              <DialogTitle className="text-2xl font-bold text-primary">Catat Hasil Pemeriksaan</DialogTitle>
+              <DialogTitle className="text-2xl font-bold text-primary">{editingId ? 'Edit Hasil Pemeriksaan' : 'Catat Hasil Pemeriksaan'}</DialogTitle>
               <DialogDescription className="font-medium">Masukkan data kesehatan hasil pemeriksaan siswa untuk Tahun Ajaran {currentAcademicYear}.</DialogDescription>
             </DialogHeader>
             <div className="grid gap-8 py-4">
@@ -454,12 +951,12 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                 <div className="grid grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Sekolah</Label>
-                    <Select value={schoolId} onValueChange={handleSchoolChange}>
+                    <Select value={scopedSchoolId ?? schoolId} onValueChange={handleSchoolChange} disabled={isKoordinator}>
                       <SelectTrigger className="rounded-xl border-slate-200">
-                        <SelectValue placeholder="Pilih sekolah" />
+                        <SelectValue placeholder="Pilih sekolah">{schools.find((s) => s.id === (scopedSchoolId ?? schoolId))?.name ?? ((scopedSchoolId ?? schoolId) ? 'Sekolah tidak tersedia' : undefined)}</SelectValue>
                       </SelectTrigger>
                       <SelectContent className="rounded-xl">
-                        {schools.map(s => (
+                        {(scopedSchoolId ? schools.filter(s => s.id === scopedSchoolId) : schools).map(s => (
                           <SelectItem key={s.id} value={s.id}>{s.name} ({s.type})</SelectItem>
                         ))}
                       </SelectContent>
@@ -467,12 +964,21 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                   </div>
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Siswa</Label>
+                    <div className="relative">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                      <Input
+                        placeholder="Cari nama/NIK/kelas…"
+                        className="pl-10 rounded-xl border-slate-200"
+                        value={studentQuery}
+                        onChange={(e) => setStudentQuery(e.target.value)}
+                      />
+                    </div>
                     <Select value={studentId} onValueChange={handleStudentChange}>
                       <SelectTrigger className="rounded-xl border-slate-200">
-                        <SelectValue placeholder="Pilih siswa" />
+                        <SelectValue placeholder="Pilih siswa">{students.find((s) => s.id === studentId)?.name ?? (studentId ? 'Siswa tidak tersedia' : undefined)}</SelectValue>
                       </SelectTrigger>
                       <SelectContent className="rounded-xl">
-                        {students.filter(s => schoolId === '' || s.schoolId === schoolId).map(s => (
+                        {students.filter(s => ((scopedSchoolId ?? schoolId) === '' || s.schoolId === (scopedSchoolId ?? schoolId)) && (studentQuery.trim() === '' || s.name.toLowerCase().includes(studentQuery.trim().toLowerCase()) || (s.nik ?? '').includes(studentQuery.trim()) || (s.class ?? '').toLowerCase().includes(studentQuery.trim().toLowerCase()))).map(s => (
                           <SelectItem key={s.id} value={s.id}>{s.name} (Kelas {s.class})</SelectItem>
                         ))}
                       </SelectContent>
@@ -555,15 +1061,27 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-slate-500 uppercase">Tajam Penglihatan (Mata)</Label>
                     <div className="grid grid-cols-2 gap-2">
-                      <Input placeholder="Kiri" value={visionLeft} onChange={(e) => setVisionLeft(e.target.value)} className="rounded-xl" />
-                      <Input placeholder="Kanan" value={visionRight} onChange={(e) => setVisionRight(e.target.value)} className="rounded-xl" />
+                      <div className="grid gap-1">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Kiri</span>
+                        <Input placeholder="Kiri" value={visionLeft} onChange={(e) => setVisionLeft(e.target.value)} className="rounded-xl" />
+                      </div>
+                      <div className="grid gap-1">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Kanan</span>
+                        <Input placeholder="Kanan" value={visionRight} onChange={(e) => setVisionRight(e.target.value)} className="rounded-xl" />
+                      </div>
                     </div>
                   </div>
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-slate-500 uppercase">Tajam Pendengaran (Telinga)</Label>
                     <div className="grid grid-cols-2 gap-2">
-                      <Input placeholder="Kiri" value={hearingLeft} onChange={(e) => setHearingLeft(e.target.value)} className="rounded-xl" />
-                      <Input placeholder="Kanan" value={hearingRight} onChange={(e) => setHearingRight(e.target.value)} className="rounded-xl" />
+                      <div className="grid gap-1">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Kiri</span>
+                        <Input placeholder="Kiri" value={hearingLeft} onChange={(e) => setHearingLeft(e.target.value)} className="rounded-xl" />
+                      </div>
+                      <div className="grid gap-1">
+                        <span className="text-[10px] font-bold text-muted-foreground uppercase">Kanan</span>
+                        <Input placeholder="Kanan" value={hearingRight} onChange={(e) => setHearingRight(e.target.value)} className="rounded-xl" />
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -734,8 +1252,8 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                     </div>
                   )}
 
-                  {/* Immunization: SD Class 1 */}
-                  {schoolType === 'SD' && studentClass === '1' && (
+                  {/* Immunization: SD Class 1 (tetap tampil saat edit bila data tersimpan belum lengkap) */}
+                  {(schoolType === 'SD' && studentClass === '1') || (editingId && immunizationHistory && immunizationHistory !== 'Lengkap') ? (
                     <div className="grid gap-2">
                       <Label className="font-bold text-slate-700">Riwayat Imunisasi (Kls 1)</Label>
                       <Select value={immunizationHistory} onValueChange={setImmunizationHistory}>
@@ -748,7 +1266,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                         </SelectContent>
                       </Select>
                     </div>
-                  )}
+                  ) : null}
 
                   {/* Anemia: SMP Class 7, SMA Class 10 (Remaja Putri) */}
                   {studentGender === 'P' && ((schoolType === 'SMP' && studentClass === '7') || (schoolType === 'SMA' && studentClass === '10')) && (
@@ -838,7 +1356,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={handleSaveScreening} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">Simpan Hasil Pemeriksaan</Button>
+              <Button onClick={() => void handleSaveScreening()} disabled={isSaving} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">{isSaving ? 'Menyimpan…' : editingId ? 'Simpan Perubahan' : 'Simpan Hasil Pemeriksaan'}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -872,7 +1390,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filteredScreenings.map((screening) => (
+            {pagedScreenings.map((screening) => (
               <TableRow key={screening.id} className="border-slate-100 hover:bg-primary/5 transition-colors">
                 <TableCell className="text-sm py-4">
                   <div className="flex items-center gap-2 text-slate-500 font-medium">
@@ -898,7 +1416,7 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                 </TableCell>
                 <TableCell className="py-4">
                   <Badge variant={screening.bmi > 25 ? 'destructive' : screening.bmi < 18.5 ? 'outline' : 'secondary'} className="rounded-md px-2 py-0.5 text-[10px] font-bold">
-                    {screening.bmi > 25 ? 'Overweight' : screening.bmi < 18.5 ? 'Underweight' : 'Normal'}
+                    {screening.bmi > 25 ? 'Gemuk' : screening.bmi < 18.5 ? 'Kurus' : 'Normal'}
                   </Badge>
                 </TableCell>
                 <TableCell className="py-4">
@@ -913,19 +1431,30 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
                 </TableCell>
                 <TableCell className="text-right py-4">
                   <div className="flex justify-end gap-1">
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title="Lihat detail"
                       className="rounded-lg font-bold text-primary hover:bg-primary/10"
                       onClick={() => handleViewDetail(screening)}
                     >
                       Detail
                     </Button>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Edit"
+                      className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary"
+                      onClick={() => handleEditScreening(screening)}
+                    >
+                      <Edit className="w-4 h-4" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Hapus"
                       className="h-8 w-8 rounded-lg text-destructive hover:bg-destructive/10"
-                      onClick={() => handleDeleteScreening(screening.id)}
+                      onClick={() => setDeleteTargetId(screening.id)}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -936,6 +1465,17 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
           </TableBody>
         </Table>
       </div>
+
+      {totalCount > 0 && (
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+          <p className="text-sm font-medium text-muted-foreground">{pageStart}-{pageEnd} dari {totalCount}</p>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" className="rounded-xl" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Sebelumnya</Button>
+            <span className="text-sm font-bold text-slate-700">{safePage}/{totalPages}</span>
+            <Button variant="outline" size="sm" className="rounded-xl" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Berikutnya</Button>
+          </div>
+        </div>
+      )}
 
       {/* Detail Dialog */}
       <Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
@@ -1116,6 +1656,14 @@ export function Screenings({ academicYear: currentAcademicYear }: ScreeningsProp
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmDeleteDialog
+        open={deleteTargetId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTargetId(null); }}
+        itemName={deleteTargetLabel}
+        description={deleteTargetLabel ? `Hasil pemeriksaan "${deleteTargetLabel}" akan dihapus permanen dan tidak dapat dikembalikan.` : undefined}
+        onConfirm={() => { if (deleteTargetId) void handleDeleteScreening(deleteTargetId); }}
+        isDeleting={isDeleting}
+      />
     </div>
   );
 }

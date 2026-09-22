@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Plus, Search, MoreVertical, Edit, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Plus, Search, Edit, Trash2 } from 'lucide-react';
 import { 
   Table, 
   TableBody, 
@@ -28,66 +28,236 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { School, SchoolType } from '@/types';
+import { School, SchoolType, User } from '@/types';
 import { toast } from 'sonner';
-import { getSchools, saveSchools } from '@/lib/storage';
+import { supabase, profileToUser, type ProfileRow } from '@/lib/supabase';
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
 
 interface SchoolsProps {
   academicYear: string;
 }
 
+interface SchoolRow {
+  id: string;
+  name: string;
+  address: string;
+  coordinator_name: string;
+  phone: string;
+  type: SchoolType;
+}
+
+// Satu-satunya titik pemetaan snake_case (schools) <-> camelCase (School),
+// mirror Users.tsx (profileToUser).
+// LINK ASIMETRIS: sekolah TIDAK PERNAH memilih koordinator di dialog.
+// Sumber kebenaran tunggal = profiles.school_id (sisi akun, dikelola di
+// Users.tsx). Kolom tabel koordinator diturunkan (derived) dari daftar
+// profiles yang dimuat di sini; coordinator_name di DB hanya fallback
+// legacy untuk nama tanpa akun.
+function schoolRowToSchool(row: SchoolRow): School {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address,
+    coordinatorName: row.coordinator_name,
+    phone: row.phone,
+    type: row.type,
+  };
+}
+
+function schoolToInsert(school: Omit<School, 'id'>) {
+  return {
+    name: school.name,
+    address: school.address,
+    coordinator_name: school.coordinatorName,
+    phone: school.phone,
+    type: school.type,
+  };
+}
+
 export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
-  const [schools, setSchools] = useState<School[]>(() => getSchools());
+  const [schools, setSchools] = useState<School[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isOpen, setIsOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   
-  // Form state
+  // Form state (tanpa pilihan koordinator — lihat komentar link asimetris di atas)
   const [newName, setNewName] = useState('');
   const [newType, setNewType] = useState<SchoolType>('SD');
-  const [newCoordinator, setNewCoordinator] = useState('');
   const [newAddress, setNewAddress] = useState('');
   const [newPhone, setNewPhone] = useState('');
 
-  const filteredSchools = schools.filter(school => 
+  const loadSchools = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    const { data, error } = await supabase
+      .from('schools')
+      .select('id, name, address, coordinator_name, phone, type')
+      .order('name', { ascending: true });
+    if (error || !data) {
+      toast.error('Gagal memuat data sekolah. Periksa koneksi dan coba lagi.');
+      setSchools([]);
+      setLoadError('Gagal memuat data sekolah.');
+    } else {
+      setSchools((data as SchoolRow[]).map(schoolRowToSchool));
+    }
+    setIsLoading(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      await loadSchools();
+      if (cancelled) return;
+      await fetchCoordinatorUsers();
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filteredSchools = schools.filter(school =>
     school.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const handleSaveSchool = () => {
-    if (!newName || !newCoordinator) {
-      toast.error("Mohon isi nama sekolah dan koordinator");
+  const coordinators = users.filter((u) => u.role === 'koordinator' && u.isActive);
+
+  const fetchCoordinatorUsers = async (): Promise<User[]> => {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, username, name, role, school_id, is_active')
+      .order('name', { ascending: true });
+    if (error || !data) {
+      toast.error('Gagal memuat data koordinator. Periksa koneksi dan coba lagi.');
+      setUsers([]);
+      return [];
+    }
+    const mapped = (data as ProfileRow[]).map(profileToUser);
+    setUsers(mapped);
+    return mapped;
+  };
+
+  const resetForm = () => {
+    setEditingId(null);
+    void fetchCoordinatorUsers();
+    setNewName('');
+    setNewType('SD');
+    setNewAddress('');
+    setNewPhone('');
+  };
+
+  const handleEditSchool = async (school: School) => {
+    await fetchCoordinatorUsers();
+    setEditingId(school.id);
+    setNewName(school.name);
+    setNewType(school.type);
+    setNewAddress(school.address);
+    setNewPhone(school.phone === '-' ? '' : school.phone);
+    setIsOpen(true);
+  };
+
+  const handleSaveSchool = async () => {
+    if (isSaving) return;
+    if (!newName.trim()) {
+      toast.error("Mohon isi nama sekolah");
       return;
     }
 
-    const newSchool: School = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: newName,
-      type: newType,
-      coordinatorName: newCoordinator,
-      address: newAddress,
-      phone: newPhone || '-',
-    };
+    setIsSaving(true);
+    try {
+      if (editingId) {
+        // EDIT: coordinator_name TIDAK disentuh — biarkan nilai tersimpan apa adanya.
+        const { data, error } = await supabase
+          .from('schools')
+          .update({ name: newName, type: newType, address: newAddress, phone: newPhone || '-' })
+          .eq('id', editingId)
+          .select('id, name, address, coordinator_name, phone, type')
+          .single();
+        if (error || !data) {
+          toast.error('Gagal memperbarui sekolah. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const updatedSchool = schoolRowToSchool(data as SchoolRow);
+        setSchools((prev) => prev.map((s) => (s.id === editingId ? updatedSchool : s)));
+        toast.success("Sekolah berhasil diperbarui");
+      } else {
+        // ADD: skema menyimpan string — koordinator diisi '-' (link asimetris:
+        // akun koordinator menunjuk sekolah via schoolId di Users.tsx).
+        const { data, error } = await supabase
+          .from('schools')
+          .insert(schoolToInsert({ name: newName, type: newType, coordinatorName: '-', address: newAddress, phone: newPhone || '-' }))
+          .select('id, name, address, coordinator_name, phone, type')
+          .single();
+        if (error || !data) {
+          toast.error('Gagal menambahkan sekolah. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const created = schoolRowToSchool(data as SchoolRow);
+        setSchools((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+        toast.success("Sekolah berhasil ditambahkan", {
+          description: `${newName} telah terdaftar di sistem.`
+        });
+      }
 
-    const updated = [...schools, newSchool];
-    setSchools(updated);
-    saveSchools(updated);
-    toast.success("Sekolah berhasil ditambahkan", {
-      description: `${newName} telah terdaftar di sistem.`
-    });
-    
-    // Reset form
-    setNewName('');
-    setNewType('SD');
-    setNewCoordinator('');
-    setNewAddress('');
-    setNewPhone('');
-    setIsOpen(false);
+      // Reset form
+      resetForm();
+      setIsOpen(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleDeleteSchool = (id: string, name: string) => {
-    const updated = schools.filter(s => s.id !== id);
-    setSchools(updated);
-    saveSchools(updated);
+  const handleDeleteSchool = async (id: string, name: string) => {
+    setIsDeleting(true);
+    try {
+    const school = schools.find((s) => s.id === id);
+    const { data: profileData, error: profileError } = await supabase
+      .from('profiles')
+      .select('id, username, name, role, school_id, is_active');
+    let coordinatorUsers: User[];
+    if (profileError || !profileData) {
+      toast.error('Gagal memeriksa akun koordinator. Penghapusan dibatalkan, coba lagi.');
+      return;
+    } else {
+      coordinatorUsers = (profileData as ProfileRow[]).map(profileToUser);
+      setUsers(coordinatorUsers);
+    }
+    const [{ count: studentCount }, { count: screeningCount }, { count: ttdCount }] = await Promise.all([
+      supabase.from('students').select('id', { count: 'exact', head: true }).eq('school_id', id),
+      supabase.from('screenings').select('id', { count: 'exact', head: true }).eq('school_id', id),
+      supabase.from('ttd_compliance').select('id', { count: 'exact', head: true }).eq('school_id', id),
+    ]);
+    const coordinatorCount = coordinatorUsers.filter(
+      (u) => u.role === 'koordinator' && (u.schoolId === id || u.name === school?.coordinatorName)
+    ).length;
+    const blockers: string[] = [];
+    if ((studentCount ?? 0) > 0) blockers.push(`${studentCount} siswa`);
+    if ((screeningCount ?? 0) > 0) blockers.push(`${screeningCount} data pemeriksaan`);
+    if ((ttdCount ?? 0) > 0) blockers.push(`${ttdCount} data TTD`);
+    if (coordinatorCount > 0) blockers.push(`${coordinatorCount} akun koordinator`);
+    if (blockers.length > 0) {
+      toast.error(`Tidak dapat menghapus: sekolah masih memiliki ${blockers.join(', ')}`);
+      return;
+    }
+    const { error: deleteError } = await supabase.from('schools').delete().eq('id', id);
+    if (deleteError) {
+      toast.error('Gagal menghapus sekolah. Data mungkin masih dipakai. Coba lagi.');
+      return;
+    }
+    setSchools((prev) => prev.filter(s => s.id !== id));
     toast.success(`Sekolah ${name} berhasil dihapus`);
+    } finally {
+      setIsDeleting(false);
+      setDeleteTarget(null);
+    }
   };
 
   return (
@@ -104,14 +274,14 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
         </div>
         <Dialog open={isOpen} onOpenChange={setIsOpen}>
           <DialogTrigger asChild>
-            <Button className="gap-2 shadow-lg shadow-primary/20 h-11 px-6 rounded-xl">
+            <Button className="gap-2 shadow-lg shadow-primary/20 h-11 px-6 rounded-xl" onClick={() => resetForm()}>
               <Plus className="w-5 h-5" /> Tambah Sekolah
             </Button>
           </DialogTrigger>
           <DialogContent className="rounded-3xl border-none shadow-2xl">
             <DialogHeader>
-              <DialogTitle className="text-2xl font-bold text-primary">Tambah Sekolah Baru</DialogTitle>
-              <DialogDescription className="font-medium">Masukkan detail sekolah binaan baru.</DialogDescription>
+              <DialogTitle className="text-2xl font-bold text-primary">{editingId ? 'Edit Sekolah' : 'Tambah Sekolah Baru'}</DialogTitle>
+              <DialogDescription className="font-medium">{editingId ? 'Perbarui detail sekolah binaan.' : 'Masukkan detail sekolah binaan baru.'}</DialogDescription>
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid gap-2">
@@ -138,16 +308,6 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
                 </Select>
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="coordinator" className="font-bold text-slate-700">Koordinator UKS</Label>
-                <Input 
-                  id="coordinator" 
-                  placeholder="Nama lengkap" 
-                  className="rounded-xl border-slate-200"
-                  value={newCoordinator}
-                  onChange={(e) => setNewCoordinator(e.target.value)}
-                />
-              </div>
-              <div className="grid gap-2">
                 <Label htmlFor="phone" className="font-bold text-slate-700">Nomor Telepon</Label>
                 <Input 
                   id="phone" 
@@ -169,7 +329,7 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={handleSaveSchool} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">Simpan Sekolah</Button>
+              <Button onClick={() => void handleSaveSchool()} disabled={isSaving} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">{isSaving ? 'Menyimpan…' : editingId ? 'Simpan Perubahan' : 'Simpan Sekolah'}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -199,7 +359,20 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filteredSchools.map((school) => (
+            {isLoading && (
+              <TableRow className="border-slate-100">
+                <TableCell colSpan={5} className="text-center py-10 text-muted-foreground font-medium">Memuat data sekolah…</TableCell>
+              </TableRow>
+            )}
+            {!isLoading && loadError && (
+              <TableRow className="border-slate-100">
+                <TableCell colSpan={5} className="text-center py-10">
+                  <p className="text-muted-foreground font-medium mb-3">{loadError}</p>
+                  <Button variant="outline" onClick={() => void loadSchools()}>Coba lagi</Button>
+                </TableCell>
+              </TableRow>
+            )}
+            {!isLoading && !loadError && filteredSchools.map((school) => (
               <TableRow key={school.id} className="border-slate-100 hover:bg-primary/5 transition-colors">
                 <TableCell className="font-bold text-slate-700 py-4">{school.name}</TableCell>
                 <TableCell className="py-4">
@@ -207,18 +380,19 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
                     {school.type}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-slate-600 font-medium py-4">{school.coordinatorName}</TableCell>
+                <TableCell className="text-slate-600 font-medium py-4">{coordinators.find((u) => u.schoolId === school.id)?.name ?? school.coordinatorName}</TableCell>
                 <TableCell className="text-slate-500 font-mono text-xs py-4">{school.phone}</TableCell>
                 <TableCell className="text-right py-4">
                   <div className="flex justify-end gap-1">
-                    <Button variant="ghost" size="icon" className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary">
+                    <Button variant="ghost" size="icon" title="Edit" className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary" onClick={() => handleEditSchool(school)}>
                       <Edit className="w-4 h-4" />
                     </Button>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      title="Hapus"
                       className="h-8 w-8 rounded-lg text-destructive hover:bg-destructive/10"
-                      onClick={() => handleDeleteSchool(school.id, school.name)}
+                      onClick={() => setDeleteTarget({ id: school.id, name: school.name })}
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -229,6 +403,14 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
           </TableBody>
         </Table>
       </div>
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        itemName={deleteTarget?.name ?? ''}
+        description={deleteTarget ? `Sekolah "${deleteTarget.name}" akan dihapus permanen dan tidak dapat dikembalikan.` : undefined}
+        onConfirm={() => { if (deleteTarget) void handleDeleteSchool(deleteTarget.id, deleteTarget.name); }}
+        isDeleting={isDeleting}
+      />
     </div>
   );
 }

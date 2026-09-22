@@ -22,5 +22,8 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  // Edge Functions jalan di Deno (global Deno + remote import esm.sh),
+  // bukan bagian bundle Vite — kecualikan dari tsc agar lint app bersih.
+  "exclude": ["supabase/functions"]
 }

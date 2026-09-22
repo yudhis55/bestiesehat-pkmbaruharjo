@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
   Plus, 
   Search, 
@@ -10,9 +10,9 @@ import {
   Download, 
   FileSpreadsheet,
   Activity,
-  User,
   School as SchoolIcon,
-  Trash2
+  Trash2,
+  Edit
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
@@ -44,51 +44,251 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { TTDCompliance, Student, School } from '../types';
-import { getStudents, getSchools, getTTDCompliance, saveTTDCompliance } from '@/lib/storage';
+import { TTDCompliance, Student, School, User } from '../types';
+import { supabase } from '@/lib/supabase';
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
 
 interface TTDComplianceProps {
   academicYear: string;
+  currentUser?: User;
 }
 
 type ComplianceRecord = TTDCompliance & { studentName: string, schoolName: string, studentClass: string };
 
-export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
-  const [records, setRecords] = useState<TTDCompliance[]>(() => getTTDCompliance());
-  const [students, setStudents] = useState<Student[]>(() => getStudents());
-  const [schools, setSchools] = useState<School[]>(() => getSchools());
+interface TTDComplianceRow {
+  id: string;
+  student_id: string;
+  school_id: string;
+  academic_year: string;
+  date: string;
+  tablets_received: number;
+  tablets_consumed: number;
+  is_compliant: boolean;
+  notes: string | null;
+  created_by: string | null;
+}
+
+interface StudentRow {
+  id: string;
+  school_id: string;
+  name: string;
+  gender: 'L' | 'P';
+  birth_date: string;
+  class: string;
+  nik: string;
+  parent_name: string;
+  whatsapp: string;
+  address: Student['address'];
+  student_id_number: string | null;
+}
+
+interface SchoolRow {
+  id: string;
+  name: string;
+  address: string;
+  coordinator_name: string;
+  phone: string;
+  type: School['type'];
+}
+
+// Satu-satunya titik pemetaan snake_case (ttd_compliance/students/schools) <->
+// camelCase (TTDCompliance/Student/School), mirror Students.tsx & Schools.tsx.
+// `age` tidak dipakai di sini, jadi diisi 0 (tak dipersist, mirror Dashboard).
+function ttdRowToModel(row: TTDComplianceRow): TTDCompliance {
+  return {
+    id: row.id,
+    studentId: row.student_id,
+    schoolId: row.school_id,
+    academicYear: row.academic_year,
+    date: row.date,
+    tabletsReceived: row.tablets_received,
+    tabletsConsumed: row.tablets_consumed,
+    isCompliant: row.is_compliant,
+    notes: row.notes ?? '',
+    createdBy: row.created_by ?? '',
+  };
+}
+
+function ttdToInsert(t: {
+  studentId: string;
+  schoolId: string;
+  academicYear: string;
+  date: string;
+  tabletsReceived: number;
+  tabletsConsumed: number;
+  isCompliant: boolean;
+  notes: string;
+  createdBy: string | null;
+}) {
+  return {
+    student_id: t.studentId,
+    school_id: t.schoolId,
+    academic_year: t.academicYear,
+    date: t.date,
+    tablets_received: t.tabletsReceived,
+    tablets_consumed: t.tabletsConsumed,
+    is_compliant: t.isCompliant,
+    notes: t.notes,
+    created_by: t.createdBy,
+  };
+}
+
+// Sel tanggal Excel bisa berupa serial number, string YYYY-MM-DD, atau Date.
+// Selalu normalkan ke ISO YYYY-MM-DD agar round-trip export<->import stabil.
+function excelCellToISODate(cell: unknown): string {
+  if (cell === null || cell === undefined || cell === '') return '';
+  if (typeof cell === 'number' && Number.isFinite(cell)) {
+    const parsed = XLSX.SSF.parse_date_code(cell);
+    if (parsed) {
+      const mm = String(parsed.m).padStart(2, '0');
+      const dd = String(parsed.d).padStart(2, '0');
+      return `${parsed.y}-${mm}-${dd}`;
+    }
+    return '';
+  }
+  const raw = cell.toString().trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return raw;
+}
+
+// Angka impor XLSX wajib valid: sel kosong/null/undefined atau non-numerik
+// mengembalikan null agar baris dilewati (tidak pernah `|| 0` menjadi hantu patuh).
+function parseStrictNumber(cell: unknown): number | null {
+  if (cell === null || cell === undefined) return null;
+  const raw = cell.toString().trim();
+  if (raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function studentRowToStudent(row: StudentRow): Student {  return {
+    id: row.id,
+    schoolId: row.school_id,
+    name: row.name,
+    gender: row.gender,
+    birthDate: row.birth_date ?? '',
+    age: 0,
+    class: row.class,
+    nik: row.nik,
+    parentName: row.parent_name,
+    whatsapp: row.whatsapp,
+    address: row.address ?? { rt: '', rw: '', desa: '', kecamatan: '', kabupaten: '', provinsi: '' },
+    studentIdNumber: row.student_id_number ?? '',
+  };
+}
+
+function schoolRowToSchool(row: SchoolRow): School {
+  return {
+    id: row.id,
+    name: row.name,
+    address: row.address,
+    coordinatorName: row.coordinator_name,
+    phone: row.phone,
+    type: row.type,
+  };
+}
+
+export function TTDComplianceMenu({ academicYear, currentUser }: TTDComplianceProps) {
+  const [records, setRecords] = useState<TTDCompliance[]>([]);
+  const [students, setStudents] = useState<Student[]>([]);
+  const [schools, setSchools] = useState<School[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isOpen, setIsOpen] = useState(false);
   const [isImportOpen, setIsImportOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [complianceFilter, setComplianceFilter] = useState<'all' | 'compliant' | 'noncompliant'>('all');
+  const [schoolFilter, setSchoolFilter] = useState('all');
+  const [monthFilter, setMonthFilter] = useState('all');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadRecords = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    const [recordRes, studentRes, schoolRes] = await Promise.all([
+      supabase.from('ttd_compliance').select('id, student_id, school_id, academic_year, date, tablets_received, tablets_consumed, is_compliant, notes, created_by'),
+      supabase.from('students').select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number'),
+      supabase.from('schools').select('id, name, address, coordinator_name, phone, type'),
+    ]);
+    if (recordRes.error || studentRes.error || schoolRes.error || !recordRes.data || !studentRes.data || !schoolRes.data) {
+      toast.error('Gagal memuat data kepatuhan TTD. Periksa koneksi dan coba lagi.');
+      setRecords([]);
+      setStudents([]);
+      setSchools([]);
+      setLoadError('Gagal memuat data kepatuhan TTD.');
+    } else {
+      setRecords((recordRes.data as TTDComplianceRow[]).map(ttdRowToModel));
+      setStudents((studentRes.data as StudentRow[]).map(studentRowToStudent));
+      setSchools((schoolRes.data as SchoolRow[]).map(schoolRowToSchool));
+    }
+    setIsLoading(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      await loadRecords();
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const isKoordinator = currentUser?.role === 'koordinator';
+  const scopedSchoolId = isKoordinator ? currentUser?.schoolId : undefined;
 
   // Form state
   const [schoolId, setSchoolId] = useState('');
   const [studentId, setStudentId] = useState('');
+  const [studentQuery, setStudentQuery] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [tabletsReceived, setTabletsReceived] = useState('4');
   const [tabletsConsumed, setTabletsConsumed] = useState('4');
   const [notes, setNotes] = useState('');
 
   const resolvedRecords = useMemo(() => {
-    return records.map(r => {
-      const student = students.find(st => st.id === r.studentId);
-      const school = schools.find(sch => sch.id === (r.schoolId || student?.schoolId));
-      return {
-        ...r,
-        studentName: student ? student.name : 'Unknown Student',
-        schoolName: school ? school.name : 'Unknown School',
-        studentClass: student ? student.class : '1',
-      };
-    });
-  }, [records, students, schools]);
+    return records
+      .map(r => {
+        const student = students.find(st => st.id === r.studentId);
+        const school = schools.find(sch => sch.id === (r.schoolId || student?.schoolId));
+        return {
+          ...r,
+          studentName: student ? student.name : 'Unknown Student',
+          schoolName: school ? school.name : 'Unknown School',
+          studentClass: student ? student.class : '1',
+        };
+      })
+      .filter((r) => {
+        if (!scopedSchoolId) return true;
+        if (r.schoolId) return r.schoolId === scopedSchoolId;
+        const student = students.find((st) => st.id === r.studentId);
+        return student?.schoolId === scopedSchoolId;
+      });
+  }, [records, students, schools, scopedSchoolId]);
 
   const filteredRecords = useMemo(() => {
-    return resolvedRecords.filter(record => 
-      record.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      record.schoolName.toLowerCase().includes(searchTerm.toLowerCase())
+    const filterSchool = schoolFilter === 'all' ? undefined : schools.find((s) => s.id === schoolFilter);
+    return resolvedRecords.filter(record =>
+      (!record.academicYear || record.academicYear === academicYear) &&
+      (record.studentName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        record.schoolName.toLowerCase().includes(searchTerm.toLowerCase())) &&
+      (complianceFilter === 'all' ||
+        (complianceFilter === 'compliant' ? record.isCompliant : !record.isCompliant)) &&
+      (!filterSchool || record.schoolName === filterSchool.name) &&
+      (monthFilter === 'all' || String(new Date(record.date).getMonth() + 1) === monthFilter)
     );
-  }, [resolvedRecords, searchTerm]);
+  }, [resolvedRecords, searchTerm, complianceFilter, schoolFilter, monthFilter, schools, academicYear]);
 
   const groupedRecords = useMemo(() => {
     const groups: Record<string, ComplianceRecord[]> = {};
@@ -101,8 +301,34 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
     return groups;
   }, [filteredRecords]);
 
-  const handleSaveRecord = () => {
-    if (!studentId || !schoolId) {
+  const resetForm = () => {
+    setEditingId(null);
+    setStudentId('');
+    setStudentQuery('');
+    setSchoolId('');
+    setDate(new Date().toISOString().split('T')[0]);
+    setTabletsReceived('4');
+    setTabletsConsumed('4');
+    setNotes('');
+  };
+
+  const handleEditRecord = (record: ComplianceRecord) => {
+    const student = students.find((st) => st.id === record.studentId);
+    setEditingId(record.id);
+    setStudentId(record.studentId || '');
+    setStudentQuery('');
+    setSchoolId(record.schoolId || student?.schoolId || '');
+    setDate(record.date ? record.date.slice(0, 10) : new Date().toISOString().split('T')[0]);
+    setTabletsReceived(String(record.tabletsReceived ?? '4'));
+    setTabletsConsumed(String(record.tabletsConsumed ?? '4'));
+    setNotes(record.notes || '');
+    setIsOpen(true);
+  };
+
+  const handleSaveRecord = async () => {
+    if (isSaving) return;
+    const effectiveSchoolId = scopedSchoolId ?? schoolId;
+    if (!studentId || !effectiveSchoolId) {
       toast.error("Mohon pilih siswa dan sekolah");
       return;
     }
@@ -110,39 +336,99 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
     const received = Number(tabletsReceived);
     const consumed = Number(tabletsConsumed);
 
-    const newRecord: TTDCompliance = {
-      id: Math.random().toString(36).substr(2, 9),
-      studentId,
-      schoolId,
-      academicYear,
-      date,
-      tabletsReceived: received,
-      tabletsConsumed: consumed,
-      isCompliant: consumed >= received,
-      notes,
-      createdBy: 'admin'
-    };
-
-    const updated = [newRecord, ...records];
-    setRecords(updated);
-    saveTTDCompliance(updated);
-    toast.success("Catatan kepatuhan berhasil disimpan");
-    setIsOpen(false);
-    
-    // Reset form
-    setStudentId('');
-    setSchoolId('');
-    setTabletsReceived('4');
-    setTabletsConsumed('4');
-    setNotes('');
+    setIsSaving(true);
+    try {
+      if (editingId) {
+        const { data, error } = await supabase
+          .from('ttd_compliance')
+          .update({
+            student_id: studentId,
+            school_id: effectiveSchoolId,
+            date,
+            tablets_received: received,
+            tablets_consumed: consumed,
+            is_compliant: consumed >= received,
+            notes,
+          })
+          .eq('id', editingId)
+          .select('id, student_id, school_id, academic_year, date, tablets_received, tablets_consumed, is_compliant, notes, created_by')
+          .single();
+        if (error || !data) {
+          toast.error('Gagal memperbarui catatan kepatuhan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const updatedRecord = ttdRowToModel(data as TTDComplianceRow);
+        setRecords((prev) => prev.map((r) => (r.id === editingId ? updatedRecord : r)));
+        toast.success("Catatan kepatuhan berhasil diperbarui");
+      } else {
+        const { data: dupHit, error: dupError } = await supabase
+          .from('ttd_compliance')
+          .select('id')
+          .eq('student_id', studentId)
+          .eq('date', date)
+          .limit(1);
+        if (dupError) {
+          toast.error('Gagal memeriksa duplikat catatan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        if (dupHit && dupHit.length > 0) {
+          toast.info('Catatan kepatuhan siswa ini pada tanggal tersebut sudah tercatat.');
+          return;
+        }
+        const createdBy = (await supabase.auth.getUser()).data.user?.id ?? null;
+        const { data, error } = await supabase
+          .from('ttd_compliance')
+          .insert(ttdToInsert({
+            studentId,
+            schoolId: effectiveSchoolId,
+            academicYear,
+            date,
+            tabletsReceived: received,
+            tabletsConsumed: consumed,
+            isCompliant: consumed >= received,
+            notes,
+            createdBy,
+          }))
+          .select('id, student_id, school_id, academic_year, date, tablets_received, tablets_consumed, is_compliant, notes, created_by')
+          .single();
+        if (error || !data) {
+          toast.error('Gagal menyimpan catatan kepatuhan. Periksa koneksi dan coba lagi.');
+          return;
+        }
+        const newRecord = ttdRowToModel(data as TTDComplianceRow);
+        setRecords((prev) => [newRecord, ...prev]);
+        toast.success("Catatan kepatuhan berhasil disimpan");
+      }
+      resetForm();
+      setIsOpen(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleDeleteRecord = (id: string) => {
-    const updated = records.filter(r => r.id !== id);
-    setRecords(updated);
-    saveTTDCompliance(updated);
+  const handleDeleteRecord = async (id: string) => {
+    setIsDeleting(true);
+    try {
+    const { error } = await supabase.from('ttd_compliance').delete().eq('id', id);
+    if (error) {
+      toast.error('Gagal menghapus catatan kepatuhan. Coba lagi.');
+      return;
+    }
+    setRecords((prev) => prev.filter((r) => r.id !== id));
     toast.success("Catatan kepatuhan berhasil dihapus");
+    } finally {
+      setIsDeleting(false);
+      setDeleteTargetId(null);
+    }
   };
+
+  const deleteTargetLabel = (() => {
+    if (!deleteTargetId) return '';
+    const found = resolvedRecords.find((r) => r.id === deleteTargetId);
+    if (!found) return deleteTargetId;
+    const dateStr = found.date ? new Date(found.date).toLocaleDateString('id-ID') : '';
+    return `${found.studentName}${dateStr ? ` — ${dateStr}` : ''}`;
+  })();
 
   const downloadTemplate = () => {
     const template = [
@@ -161,6 +447,27 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
     XLSX.writeFile(wb, "Template_Kepatuhan_TTD.xlsx");
   };
 
+  const handleExport = () => {
+    // 'NIK Siswa' disertakan agar export->import round-trip (impor
+    // mencocokkan siswa via NIK/nama persis seperti kunci template).
+    const dataToExport = filteredRecords.map((record) => ({
+      'NIK Siswa': students.find((st) => st.id === record.studentId)?.nik ?? '',
+      'Nama Siswa': record.studentName,
+      'Sekolah': record.schoolName,
+      'Kelas': record.studentClass,
+      'Tanggal (YYYY-MM-DD)': record.date ? record.date.slice(0, 10) : '',
+      'Tablet Diterima': record.tabletsReceived,
+      'Tablet Diminum': record.tabletsConsumed,
+      'Status': record.isCompliant ? 'Patuh' : 'Tidak Patuh',
+      'Catatan': record.notes || '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(dataToExport);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Kepatuhan TTD");
+    XLSX.writeFile(wb, `ttd-compliance-${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast.success(`Berhasil mengekspor ${dataToExport.length} data`);
+  };
+
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -174,38 +481,76 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
         const ws = wb.Sheets[wsname];
         const data = XLSX.utils.sheet_to_json(ws) as any[];
 
-        const newRecords: TTDCompliance[] = [];
-        data.forEach(row => {
+        const parsed: Omit<TTDCompliance, 'id'>[] = [];
+        const skippedRows: string[] = [];
+        data.forEach((row, index) => {
           const nik = row['NIK Siswa']?.toString();
           const name = row['Nama Siswa']?.toString();
           const student = students.find(s => (nik && s.nik === nik) || (name && s.name.toLowerCase() === name.toLowerCase()));
 
-          if (student) {
-            const received = Number(row['Tablet Diterima']) || 0;
-            const consumed = Number(row['Tablet Diminum']) || 0;
-            newRecords.push({
-              id: Math.random().toString(36).substr(2, 9),
+          if (!student) {
+            skippedRows.push(`Baris ${index + 1}: Siswa tidak ditemukan (${name || nik || 'tanpa identitas'})`);
+            return;
+          }
+          {
+            const received = parseStrictNumber(row['Tablet Diterima']);
+            const consumed = parseStrictNumber(row['Tablet Diminum']);
+            if (received === null || consumed === null) {
+              skippedRows.push(`Baris ${index + 1}: Tablet Diterima/Diminum kosong atau tidak valid`);
+              return;
+            }
+            parsed.push({
               studentId: student.id,
               schoolId: student.schoolId,
               academicYear,
-              date: row['Tanggal (YYYY-MM-DD)'] || new Date().toISOString().split('T')[0],
+              date: excelCellToISODate(row['Tanggal (YYYY-MM-DD)']) || new Date().toISOString().split('T')[0],
               tabletsReceived: received,
               tabletsConsumed: consumed,
               isCompliant: consumed >= received,
               notes: row['Catatan'] || '',
-              createdBy: 'admin'
+              createdBy: '',
             });
           }
         });
 
-        if (newRecords.length > 0) {
-          setRecords(prev => {
-            const updated = [...newRecords, ...prev];
-            saveTTDCompliance(updated);
-            return updated;
-          });
-          toast.success(`Berhasil mengimpor ${newRecords.length} data`);
-          setIsImportOpen(false);
+        if (parsed.length > 0) {
+          // Paksa scope koordinator server-side: baris sekolah lain dilewati.
+          const scopedRecords = scopedSchoolId
+            ? parsed.filter((r) => r.schoolId === scopedSchoolId)
+            : parsed;
+          const scopeSkipped = parsed.length - scopedRecords.length;
+          if (skippedRows.length > 0 || scopeSkipped > 0) {
+            const parts = [...skippedRows];
+            if (scopeSkipped > 0) parts.push(`${scopeSkipped} baris di luar sekolah Anda`);
+            toast.error(`${parts.length} baris dilewati: ${parts.join('; ')}`);
+          }
+          if (scopedRecords.length === 0) {
+            toast.error("Tidak ada data valid untuk sekolah Anda");
+            return;
+          }
+          void (async () => {
+            setIsImporting(true);
+            try {
+              const createdBy = (await supabase.auth.getUser()).data.user?.id ?? null;
+              const { data: inserted, error } = await supabase
+                .from('ttd_compliance')
+                .insert(scopedRecords.map((r) => ttdToInsert({ ...r, notes: r.notes ?? '', createdBy })))
+                .select('id, student_id, school_id, academic_year, date, tablets_received, tablets_consumed, is_compliant, notes, created_by');
+              if (error || !inserted) {
+                toast.error('Gagal mengimpor data kepatuhan TTD. Periksa koneksi dan coba lagi.');
+                return;
+              }
+              const created = (inserted as TTDComplianceRow[]).map(ttdRowToModel);
+              setRecords((prev) => [...created, ...prev]);
+              const skippedTotal = skippedRows.length + scopeSkipped;
+              toast.success(`Berhasil mengimpor ${created.length} data kepatuhan TTD`, {
+                description: skippedTotal > 0 ? `${skippedTotal} baris dilewati. TA ${academicYear}.` : `Data telah ditambahkan untuk TA ${academicYear}.`
+              });
+              setIsImportOpen(false);
+            } finally {
+              setIsImporting(false);
+            }
+          })();
         } else {
           toast.error("Tidak ada data valid yang ditemukan");
         }
@@ -230,10 +575,10 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
           <p className="text-muted-foreground font-medium">Pencatatan konsumsi Tablet Tambah Darah mingguan.</p>
         </div>
         
-        <div className="flex items-center gap-3">
+        <div className="flex gap-2">
           <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
             <DialogTrigger asChild>
-              <Button variant="outline" className="gap-2 h-11 px-6 rounded-xl border-slate-200 hover:bg-slate-50">
+              <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200 hover:bg-primary/5 hover:text-primary transition-all">
                 <Upload className="w-4 h-4" /> Import Excel
               </Button>
             </DialogTrigger>
@@ -276,31 +621,43 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
               </div>
             </DialogContent>
           </Dialog>
+          <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200" onClick={handleExport}>
+            <Download className="w-4 h-4" /> Export
+          </Button>
 
-          <Dialog open={isOpen} onOpenChange={setIsOpen}>
+          <Dialog open={isOpen} onOpenChange={(open) => { if (!open) setStudentQuery(''); setIsOpen(open); }}>
             <DialogTrigger asChild>
-              <Button className="gap-2 shadow-lg shadow-primary/20 h-11 px-6 rounded-xl">
-                <Plus className="w-5 h-5" /> Catat Kepatuhan
+              <Button className="gap-2 h-11 px-6 rounded-xl shadow-lg shadow-primary/20" onClick={() => resetForm()}>
+                <Plus className="w-4 h-4" /> Catat Kepatuhan
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-md rounded-3xl border-none shadow-2xl">
+            <DialogContent className="max-w-lg rounded-3xl border-none shadow-2xl">
               <DialogHeader>
-                <DialogTitle className="text-2xl font-bold text-primary">Catat Konsumsi TTD</DialogTitle>
+                <DialogTitle className="text-2xl font-bold text-primary">{editingId ? 'Edit Konsumsi TTD' : 'Catat Konsumsi TTD'}</DialogTitle>
                 <DialogDescription className="font-medium">Masukkan data konsumsi tablet tambah darah siswa.</DialogDescription>
               </DialogHeader>
               <div className="grid gap-6 py-4">
                 <div className="grid gap-2">
                   <Label className="font-bold text-slate-700">Siswa (Remaja Putri)</Label>
+                  <div className="relative">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                    <Input
+                      placeholder="Cari nama/NIK/kelas…"
+                      className="pl-10 rounded-xl border-slate-200"
+                      value={studentQuery}
+                      onChange={(e) => setStudentQuery(e.target.value)}
+                    />
+                  </div>
                   <Select value={studentId} onValueChange={(id) => {
                     setStudentId(id);
                     const s = students.find(st => st.id === id);
                     if (s) setSchoolId(s.schoolId);
                   }}>
                     <SelectTrigger className="rounded-xl border-slate-200">
-                      <SelectValue placeholder="Pilih siswa" />
+                      <SelectValue placeholder="Pilih siswa">{students.find((s) => s.id === studentId)?.name ?? (studentId ? 'Siswa tidak tersedia' : undefined)}</SelectValue>
                     </SelectTrigger>
                     <SelectContent className="rounded-xl">
-                      {students.filter(s => s.gender === 'P').map(s => (
+                      {students.filter(s => s.gender === 'P' && (!scopedSchoolId || s.schoolId === scopedSchoolId) && (studentQuery.trim() === '' || s.name.toLowerCase().includes(studentQuery.trim().toLowerCase()) || (s.nik ?? '').includes(studentQuery.trim()) || (s.class ?? '').toLowerCase().includes(studentQuery.trim().toLowerCase()))).map(s => (
                         <SelectItem key={s.id} value={s.id}>{s.name} (Kelas {s.class})</SelectItem>
                       ))}
                     </SelectContent>
@@ -329,25 +686,71 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
                 </div>
               </div>
               <DialogFooter>
-                <Button onClick={handleSaveRecord} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">Simpan Catatan</Button>
+                <Button onClick={() => void handleSaveRecord()} disabled={isSaving} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">{isSaving ? 'Menyimpan…' : editingId ? 'Simpan Perubahan' : 'Simpan Catatan'}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
       </div>
 
-      <div className="flex items-center gap-4">
-        <div className="relative flex-1">
+      <div className="flex flex-wrap items-center gap-4">
+        <div className="relative flex-1 min-w-52">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input 
-            placeholder="Cari nama siswa atau sekolah..." 
+          <Input
+            placeholder="Cari nama siswa atau sekolah..."
             className="pl-10 h-11 rounded-xl border-slate-200 bg-white/50"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
+        {!isKoordinator && (
+          <Select value={schoolFilter} onValueChange={setSchoolFilter}>
+            <SelectTrigger className="w-48 h-11 rounded-xl border-slate-200 bg-white/50 font-bold text-slate-600">
+              <SelectValue placeholder="Semua Sekolah">{schoolFilter === 'all' ? undefined : (schools.find((s) => s.id === schoolFilter)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
+            </SelectTrigger>
+            <SelectContent className="rounded-xl">
+              <SelectItem value="all">Semua Sekolah</SelectItem>
+              {schools.map((s) => (
+                <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+        <Select value={monthFilter} onValueChange={setMonthFilter}>
+          <SelectTrigger className="w-48 h-11 rounded-xl border-slate-200 bg-white/50 font-bold text-slate-600">
+            <SelectValue placeholder="Semua Bulan">{monthFilter === 'all' ? undefined : (['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'][Number(monthFilter) - 1] ?? 'Bulan tidak tersedia')}</SelectValue>
+          </SelectTrigger>
+          <SelectContent className="rounded-xl">
+            <SelectItem value="all">Semua Bulan</SelectItem>
+            {['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'].map((label, i) => (
+              <SelectItem key={String(i + 1)} value={String(i + 1)}>{label}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select value={complianceFilter} onValueChange={(v) => setComplianceFilter(v as 'all' | 'compliant' | 'noncompliant')}>
+          <SelectTrigger className="w-48 h-11 rounded-xl border-slate-200 bg-white/50 font-bold text-slate-600">
+            <SelectValue placeholder="Semua Status">{complianceFilter === 'all' ? undefined : (complianceFilter === 'compliant' ? 'Patuh' : 'Tidak Patuh')}</SelectValue>
+          </SelectTrigger>
+          <SelectContent className="rounded-xl">
+            <SelectItem value="all">Semua Status</SelectItem>
+            <SelectItem value="compliant">Patuh</SelectItem>
+            <SelectItem value="noncompliant">Tidak Patuh</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
+      {isLoading && (
+        <div className="text-center py-20 bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+          <p className="text-muted-foreground font-medium">Memuat data kepatuhan TTD…</p>
+        </div>
+      )}
+      {!isLoading && loadError && (
+        <div className="text-center py-20 bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+          <p className="text-muted-foreground font-medium mb-3">{loadError}</p>
+          <Button variant="outline" onClick={() => void loadRecords()}>Coba lagi</Button>
+        </div>
+      )}
+      {!isLoading && !loadError && (
       <div className="border-none rounded-2xl bg-white/50 backdrop-blur-sm shadow-sm overflow-hidden">
         <Table>
           <TableHeader className="bg-slate-50/50">
@@ -405,14 +808,26 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
                         )}
                       </TableCell>
                       <TableCell className="text-right py-4">
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
-                          className="h-8 w-8 rounded-lg text-destructive hover:bg-destructive/10"
-                          onClick={() => handleDeleteRecord(record.id)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Edit"
+                            className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary"
+                            onClick={() => handleEditRecord(record)}
+                          >
+                            <Edit className="w-4 h-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Hapus"
+                            className="h-8 w-8 rounded-lg text-destructive hover:bg-destructive/10"
+                            onClick={() => setDeleteTargetId(record.id)}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -428,6 +843,15 @@ export function TTDComplianceMenu({ academicYear }: TTDComplianceProps) {
           </TableBody>
         </Table>
       </div>
+      )}
+      <ConfirmDeleteDialog
+        open={deleteTargetId !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTargetId(null); }}
+        itemName={deleteTargetLabel}
+        description={deleteTargetLabel ? `Catatan kepatuhan "${deleteTargetLabel}" akan dihapus permanen dan tidak dapat dikembalikan.` : undefined}
+        onConfirm={() => { if (deleteTargetId) void handleDeleteRecord(deleteTargetId); }}
+        isDeleting={isDeleting}
+      />
     </div>
   );
 }

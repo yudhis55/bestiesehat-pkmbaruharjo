@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { FileText, Download, Filter, CheckCircle2, Clock, Calendar as CalendarIcon, ArrowUpDown } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FileText, Download, Filter, CheckCircle2, Clock, Calendar as CalendarIcon, ArrowUpDown, Plus, Trash2 } from 'lucide-react';
 import { 
   Card, 
   CardContent, 
@@ -25,7 +25,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import * as XLSX from 'xlsx';
+import { supabase } from '@/lib/supabase';
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
 import { 
   BarChart, 
   Bar, 
@@ -41,13 +45,51 @@ import {
 } from 'recharts';
 
 import { Report } from '@/types';
-import { LogoTrenggalekSVG, LogoPuskesmasBaruharjoSVG, LogoUKSSVG } from '@/components/LogosSVG';
+import { LOGO_PATHS } from '@/components/HeaderLogos';
 
-const mockReports: Report[] = [
-  { id: '1', schoolId: '1', schoolName: 'SDN 01 Kota', month: 3, year: 2024, academicYear: '2024/2025', entryDate: '2024-03-12T00:00:00Z', status: 'approved', totalStudents: 150, createdBy: 'admin' },
-  { id: '2', schoolId: '2', schoolName: 'SMPN 01 Kota', month: 3, year: 2024, academicYear: '2024/2025', entryDate: '2024-03-14T00:00:00Z', status: 'submitted', totalStudents: 200, createdBy: 'admin' },
-  { id: '3', schoolId: '3', schoolName: 'SMAN 01 Kota', month: 2, year: 2024, academicYear: '2023/2024', entryDate: '2024-02-10T00:00:00Z', status: 'approved', totalStudents: 180, createdBy: 'admin' },
-];
+interface ReportRow {
+  id: string;
+  school_id: string;
+  school_name: string;
+  academic_year: string;
+  month: number;
+  year: number;
+  entry_date: string | null;
+  total_students: number;
+  status: 'submitted' | 'approved';
+  created_by: string | null;
+}
+
+// Satu-satunya titik pemetaan snake_case (reports) <-> camelCase (Report),
+// mirror Schools.tsx (schoolRowToSchool / schoolToInsert).
+function reportRowToReport(row: ReportRow): Report {
+  return {
+    id: row.id,
+    schoolId: row.school_id,
+    schoolName: row.school_name,
+    academicYear: row.academic_year,
+    month: row.month,
+    year: row.year,
+    entryDate: row.entry_date ?? '',
+    totalStudents: row.total_students,
+    status: row.status,
+    createdBy: row.created_by ?? '',
+  };
+}
+
+function reportToInsert(report: { schoolId: string; schoolName: string; academicYear: string; month: number; year: number; entryDate: string; totalStudents: number; createdBy: string }) {
+  return {
+    school_id: report.schoolId,
+    school_name: report.schoolName,
+    academic_year: report.academicYear,
+    month: report.month,
+    year: report.year,
+    entry_date: report.entryDate,
+    total_students: report.totalStudents,
+    status: 'submitted',
+    created_by: report.createdBy || null,
+  };
+}
 
 const monthNames = [
   '', 'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
@@ -59,19 +101,132 @@ interface ReportsProps {
 }
 
 export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
-  const [reports, setReports] = useState<Report[]>(mockReports);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [schools, setSchools] = useState<{ id: string; name: string }[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedMonth, setSelectedMonth] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [verifyDialogOpen, setVerifyDialogOpen] = useState(false);
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [reportToVerify, setReportToVerify] = useState<Report | null>(null);
   const [selectedReportForDetail, setSelectedReportForDetail] = useState<Report | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Report | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Form tambah laporan
+  const [newSchoolId, setNewSchoolId] = useState('');
+  const [newMonth, setNewMonth] = useState<string>(String(new Date().getMonth() + 1));
+  const [newYear, setNewYear] = useState<string>(String(new Date().getFullYear()));
+  const [newTotalStudents, setNewTotalStudents] = useState<string>('');
+
+  const loadReports = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    const { data, error } = await supabase
+      .from('reports')
+      .select('id, school_id, school_name, academic_year, month, year, entry_date, total_students, status, created_by')
+      .order('entry_date', { ascending: false });
+    if (error || !data) {
+      toast.error('Gagal memuat data laporan. Periksa koneksi dan coba lagi.');
+      setReports([]);
+      setLoadError('Gagal memuat data laporan.');
+    } else {
+      setReports((data as ReportRow[]).map(reportRowToReport));
+    }
+    setIsLoading(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      await loadReports();
+      const { data: schoolData } = await supabase
+        .from('schools')
+        .select('id, name')
+        .order('name', { ascending: true });
+      if (cancelled) return;
+      if (schoolData) {
+        setSchools(schoolData as { id: string; name: string }[]);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const resetAddForm = () => {
+    setNewSchoolId('');
+    setNewMonth(String(new Date().getMonth() + 1));
+    setNewYear(String(new Date().getFullYear()));
+    setNewTotalStudents('');
+  };
+
+  const handleAddReport = async () => {
+    if (isSaving) return;
+    const month = parseInt(newMonth, 10);
+    const year = parseInt(newYear, 10);
+    const totalStudents = parseInt(newTotalStudents, 10);
+    const school = schools.find((s) => s.id === newSchoolId);
+    if (!school || !month || !year || Number.isNaN(totalStudents) || totalStudents < 0) {
+      toast.error('Mohon isi sekolah, bulan, tahun, dan total siswa dengan benar');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const { data: dupHit, error: dupError } = await supabase
+        .from('reports')
+        .select('id')
+        .eq('school_id', school.id)
+        .eq('month', month)
+        .eq('year', year)
+        .limit(1);
+      if (dupError) {
+        toast.error('Gagal memeriksa duplikat laporan. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      if (dupHit && dupHit.length > 0) {
+        toast.info('Laporan sekolah ini untuk bulan dan tahun tersebut sudah tercatat.');
+        return;
+      }
+      const { data: authData } = await supabase.auth.getUser();
+      const { data, error } = await supabase
+        .from('reports')
+        .insert(reportToInsert({
+          schoolId: school.id,
+          schoolName: school.name,
+          academicYear: currentAcademicYear,
+          month,
+          year,
+          entryDate: new Date().toISOString().slice(0, 10),
+          totalStudents,
+          createdBy: authData.user?.id ?? '',
+        }))
+        .select('id, school_id, school_name, academic_year, month, year, entry_date, total_students, status, created_by')
+        .single();
+      if (error || !data) {
+        toast.error('Gagal menambahkan laporan. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      setReports((prev) => [reportRowToReport(data as ReportRow), ...prev]);
+      toast.success('Laporan berhasil ditambahkan');
+      resetAddForm();
+      setAddDialogOpen(false);
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   const filteredReports = reports.filter((report) => {
     const matchesMonth = selectedMonth === 'all' || report.month.toString() === selectedMonth;
     const matchesStatus = selectedStatus === 'all' || report.status === selectedStatus;
-    const matchesAcademicYear = report.academicYear === currentAcademicYear;
+    const matchesAcademicYear = !report.academicYear || report.academicYear === currentAcademicYear;
     return matchesMonth && matchesStatus && matchesAcademicYear;
   });
 
@@ -91,16 +246,54 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
     setDetailDialogOpen(true);
   };
 
-  const confirmVerification = () => {
-    if (reportToVerify) {
-      setReports(reports.map(r => 
-        r.id === reportToVerify.id ? { ...r, status: 'approved' } : r
-      ));
-      toast.success("Laporan berhasil disetujui");
-      setVerifyDialogOpen(false);
-      setReportToVerify(null);
+  const confirmVerification = async () => {
+    if (!reportToVerify) return;
+    const { data, error } = await supabase
+      .from('reports')
+      .update({ status: 'approved' })
+      .eq('id', reportToVerify.id)
+      .select('id, school_id, school_name, academic_year, month, year, entry_date, total_students, status, created_by')
+      .single();
+    if (error || !data) {
+      toast.error('Gagal menyetujui laporan. Periksa koneksi dan coba lagi.');
+      return;
+    }
+    const updated = reportRowToReport(data as ReportRow);
+    setReports((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+    toast.success("Laporan berhasil disetujui");
+    setVerifyDialogOpen(false);
+    setReportToVerify(null);
+  };
+
+  const handleDeleteReport = async (report: Report) => {
+    setIsDeleting(true);
+    try {
+    if (report.status !== 'submitted') {
+      toast.error('Hanya laporan berstatus submitted (draft) yang dapat dihapus');
+      return;
+    }
+    const { error } = await supabase.from('reports').delete().eq('id', report.id);
+    if (error) {
+      toast.error('Gagal menghapus laporan. Coba lagi.');
+      return;
+    }
+    setReports((prev) => prev.filter((r) => r.id !== report.id));
+    if (selectedReportForDetail?.id === report.id) {
+      setDetailDialogOpen(false);
+      setSelectedReportForDetail(null);
+    }
+    toast.success('Laporan berhasil dihapus');
+    } finally {
+      setIsDeleting(false);
+      setDeleteTarget(null);
     }
   };
+
+  const deleteTargetLabel = (() => {
+    if (!deleteTarget) return '';
+    const monthLabel = monthNames[deleteTarget.month] ?? `Bulan ${deleteTarget.month}`;
+    return `${deleteTarget.schoolName} — ${monthLabel} ${deleteTarget.year}`;
+  })();
 
   const handleExport = () => {
     if (sortedReports.length === 0) {
@@ -132,9 +325,9 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
   // Data for Charts
   const reportsByMonthData = monthNames.slice(1).map((name, index) => {
     const monthIndex = index + 1;
-    const count = reports.filter(r => r.month === monthIndex && r.academicYear === currentAcademicYear).length;
+    const count = reports.filter(r => r.month === monthIndex && (!r.academicYear || r.academicYear === currentAcademicYear)).length;
     const students = reports
-      .filter(r => r.month === monthIndex && r.academicYear === currentAcademicYear)
+      .filter(r => r.month === monthIndex && (!r.academicYear || r.academicYear === currentAcademicYear))
       .reduce((sum, r) => sum + r.totalStudents, 0);
     
     return {
@@ -145,8 +338,8 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
   }).filter(d => d.jumlah > 0);
 
   const statusData = [
-    { name: 'Disetujui', value: reports.filter(r => r.status === 'approved' && r.academicYear === currentAcademicYear).length, color: '#10b981' },
-    { name: 'Menunggu', value: reports.filter(r => r.status === 'submitted' && r.academicYear === currentAcademicYear).length, color: '#f59e0b' },
+    { name: 'Disetujui', value: reports.filter(r => r.status === 'approved' && (!r.academicYear || r.academicYear === currentAcademicYear)).length, color: '#10b981' },
+    { name: 'Menunggu', value: reports.filter(r => r.status === 'submitted' && (!r.academicYear || r.academicYear === currentAcademicYear)).length, color: '#f59e0b' },
   ].filter(d => d.value > 0);
 
   return (
@@ -162,6 +355,12 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
           <p className="text-muted-foreground font-medium">Kelola dan verifikasi laporan bulanan dari sekolah.</p>
         </div>
         <div className="flex gap-2">
+          <Button
+            className="gap-2 h-11 px-5 rounded-xl shadow-lg shadow-primary/20"
+            onClick={() => { resetAddForm(); setAddDialogOpen(true); }}
+          >
+            <Plus className="w-4 h-4" /> Tambah Laporan
+          </Button>
           <Button 
             variant="outline" 
             className="gap-2 h-11 px-5 rounded-xl border-slate-200 hover:bg-primary/5 hover:text-primary transition-all"
@@ -276,7 +475,16 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
       </div>
 
       <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-        {sortedReports.length > 0 ? (
+        {isLoading ? (
+          <div className="col-span-full py-20 text-center bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+            <p className="text-muted-foreground font-medium">Memuat data laporan…</p>
+          </div>
+        ) : loadError ? (
+          <div className="col-span-full py-20 text-center bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+            <p className="text-muted-foreground font-medium mb-3">{loadError}</p>
+            <Button variant="outline" onClick={() => void loadReports()}>Coba lagi</Button>
+          </div>
+        ) : sortedReports.length > 0 ? (
           sortedReports.map((report) => (
             <Card key={report.id} className="border-none shadow-sm hover:shadow-md transition-all duration-200 bg-white/50 backdrop-blur-sm group">
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -378,15 +586,15 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
             <div className="grid gap-6 py-2">
               {/* Kop Surat Header */}
               <div className="flex items-center justify-between p-4 bg-teal-50/50 rounded-2xl border border-teal-100/80 mb-2">
-                <LogoTrenggalekSVG className="h-12 w-12" />
+                <img src={LOGO_PATHS.trenggalek} alt="Logo Kabupaten Trenggalek" className="h-12 w-12 object-contain" />
                 <div className="text-center flex-1 px-2">
                   <p className="text-[10px] font-black uppercase text-teal-800 tracking-wider">Pemerintah Kabupaten Trenggalek</p>
                   <p className="text-sm font-black text-slate-800 uppercase">Dinas Kesehatan - Puskesmas Baruharjo</p>
                   <p className="text-[10px] font-bold text-slate-500">Tim Pembina Usaha Kesehatan Sekolah (UKS)</p>
                 </div>
                 <div className="flex gap-2 items-center">
-                  <LogoPuskesmasBaruharjoSVG className="h-10 w-10" />
-                  <LogoUKSSVG className="h-10 w-10" />
+                  <img src={LOGO_PATHS.puskesmas} alt="Logo Puskesmas Baruharjo" className="h-10 w-10 object-contain" />
+                  <img src={LOGO_PATHS.uks} alt="Logo UKS" className="h-10 w-10 object-contain" />
                 </div>
               </div>
 
@@ -440,13 +648,100 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
             </div>
           )}
 
-          <DialogFooter className="mt-4">
+          <DialogFooter className="mt-4 gap-2 sm:gap-0">
+            {selectedReportForDetail && selectedReportForDetail.status === 'submitted' && (
+              <Button
+                variant="destructive"
+                onClick={() => setDeleteTarget(selectedReportForDetail)}
+                className="rounded-xl font-bold w-full sm:w-auto gap-2"
+              >
+                <Trash2 className="w-4 h-4" /> Hapus Draft
+              </Button>
+            )}
             <Button onClick={() => setDetailDialogOpen(false)} className="rounded-xl font-bold w-full sm:w-auto">
               Tutup
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Tambah Laporan Dialog */}
+      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+        <DialogContent className="rounded-3xl border-none shadow-2xl max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-bold text-primary">Tambah Laporan</DialogTitle>
+            <DialogDescription className="font-medium">
+              Buat laporan bulanan baru untuk tahun ajaran {currentAcademicYear}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid gap-2">
+              <Label htmlFor="report-school" className="font-bold text-slate-700">Sekolah</Label>
+              <Select value={newSchoolId} onValueChange={setNewSchoolId}>
+                <SelectTrigger id="report-school" className="rounded-xl border-slate-200">
+                  <SelectValue placeholder="Pilih sekolah" />
+                </SelectTrigger>
+                <SelectContent className="rounded-xl">
+                  {schools.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="report-month" className="font-bold text-slate-700">Bulan</Label>
+                <Select value={newMonth} onValueChange={setNewMonth}>
+                  <SelectTrigger id="report-month" className="rounded-xl border-slate-200">
+                    <SelectValue placeholder="Pilih bulan" />
+                  </SelectTrigger>
+                  <SelectContent className="rounded-xl">
+                    {monthNames.map((name, index) => index > 0 && (
+                      <SelectItem key={index} value={index.toString()}>{name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="report-year" className="font-bold text-slate-700">Tahun</Label>
+                <Input
+                  id="report-year"
+                  type="number"
+                  className="rounded-xl border-slate-200"
+                  value={newYear}
+                  onChange={(e) => setNewYear(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="report-total" className="font-bold text-slate-700">Total Siswa Diperiksa</Label>
+              <Input
+                id="report-total"
+                type="number"
+                min={0}
+                placeholder="Contoh: 150"
+                className="rounded-xl border-slate-200"
+                value={newTotalStudents}
+                onChange={(e) => setNewTotalStudents(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setAddDialogOpen(false)} className="rounded-xl font-bold">Batal</Button>
+            <Button onClick={() => void handleAddReport()} disabled={isSaving} className="rounded-xl shadow-lg shadow-primary/20 font-bold">
+              {isSaving ? 'Menyimpan…' : 'Simpan Laporan'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        itemName={deleteTargetLabel}
+        description={deleteTarget ? `Laporan "${deleteTargetLabel}" akan dihapus permanen dan tidak dapat dikembalikan.` : undefined}
+        onConfirm={() => { if (deleteTarget) void handleDeleteReport(deleteTarget); }}
+        isDeleting={isDeleting}
+      />
     </div>
   );
 }

@@ -1,10 +1,19 @@
-import { School, Student, Screening, TTDCompliance } from '../types';
+import { School, Student, Screening, TTDCompliance, User } from '../types';
 
 // Initial data keys for localStorage
 const SCHOOLS_KEY = 'uks_schools';
 const STUDENTS_KEY = 'uks_students';
 const SCREENINGS_KEY = 'uks_screenings';
 const TTD_KEY = 'uks_ttd_compliance';
+const SESSION_KEY = 'uks_session';
+
+// Generates a unique string ID for new records (crypto.randomUUID with legacy fallback).
+export const generateId = (): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).substr(2, 9);
+};
 
 const initialSchools: School[] = [
   { id: '1', name: 'SDN 01 Kota', address: 'Jl. Merdeka No. 1', coordinatorName: 'Budi Santoso', phone: '08123456789', type: 'SD' },
@@ -202,4 +211,24 @@ export const getTTDCompliance = (): TTDCompliance[] => {
 
 export const saveTTDCompliance = (records: TTDCompliance[]) => {
   localStorage.setItem(TTD_KEY, JSON.stringify(records));
+};
+
+export const getSession = (): User | null => {
+  const data = localStorage.getItem(SESSION_KEY);
+  if (!data) {
+    return null;
+  }
+  return JSON.parse(data);
+};
+
+export const saveSession = (user: User | null) => {
+  if (user === null) {
+    localStorage.removeItem(SESSION_KEY);
+    return;
+  }
+  localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+};
+
+export const clearSession = () => {
+  localStorage.removeItem(SESSION_KEY);
 };

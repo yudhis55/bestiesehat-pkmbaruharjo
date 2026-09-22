@@ -110,3 +110,16 @@ export interface Report {
   status: 'submitted' | 'approved';
   createdBy: string;
 }
+
+export type UserRole = 'admin' | 'koordinator';
+
+// NOTE: password is plain-text MOCK for frontend-only prototype. TODO: replace with Supabase Auth.
+export interface User {
+  id: string;
+  username: string;
+  password: string;
+  name: string;
+  role: UserRole;
+  schoolId?: string;
+  isActive: boolean;
+}

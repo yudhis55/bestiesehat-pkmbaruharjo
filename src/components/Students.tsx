@@ -1,5 +1,5 @@
-import React, { useState, useRef, useMemo } from 'react';
-import { Plus, Search, Filter, Download, Upload, FileSpreadsheet, AlertCircle, Trash2, Pencil, Calendar, Clock } from 'lucide-react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { Plus, Search, Filter, Download, Upload, FileSpreadsheet, AlertCircle, Trash2, Edit, Calendar, Clock } from 'lucide-react';
 import { 
   Table, 
   TableBody, 
@@ -30,17 +30,99 @@ import {
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
 import * as XLSX from 'xlsx';
-import { Student } from '@/types';
-import { getStudents, saveStudents, getSchools } from '@/lib/storage';
+import { School, Student, User } from '@/types';
+import { supabase } from '@/lib/supabase';
+import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
 import { calculateAgeDetails, calculateAgeYears } from '@/lib/ageUtils';
 
 interface StudentsProps {
   academicYear: string;
+  currentUser?: User;
 }
 
-export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
-  const [students, setStudents] = useState<Student[]>(() => getStudents());
-  const [schools, setSchools] = useState(() => getSchools());
+interface StudentRow {
+  id: string;
+  school_id: string;
+  name: string;
+  gender: 'L' | 'P';
+  birth_date: string;
+  class: string;
+  nik: string;
+  parent_name: string;
+  whatsapp: string;
+  address: Student['address'];
+  student_id_number: string | null;
+}
+
+interface SchoolRefRow {
+  id: string;
+  name: string;
+  type: School['type'];
+}
+
+// Satu-satunya titik pemetaan snake_case (students/schools) <-> camelCase
+// (Student/School), mirror Users.tsx. `age` tidak dipersist (dihitung saat
+// render via calculateAgeYears dari birth_date). Koordinator RLS otomatis
+// membatasi baca; dropdown hanya UX, bukan keamanan.
+function studentRowToStudent(row: StudentRow): Student {
+  return {
+    id: row.id,
+    schoolId: row.school_id,
+    name: row.name,
+    gender: row.gender,
+    birthDate: row.birth_date ?? '',
+    age: calculateAgeYears(row.birth_date ?? ''),
+    class: row.class,
+    nik: row.nik,
+    parentName: row.parent_name,
+    whatsapp: row.whatsapp,
+    address: row.address ?? { rt: '', rw: '', desa: '', kecamatan: '', kabupaten: '', provinsi: '' },
+    studentIdNumber: row.student_id_number ?? '',
+  };
+}
+
+function studentToInsert(s: Omit<Student, 'id' | 'age'>) {
+  return {
+    school_id: s.schoolId,
+    name: s.name,
+    gender: s.gender,
+    birth_date: s.birthDate,
+    class: s.class,
+    nik: s.nik,
+    parent_name: s.parentName,
+    whatsapp: s.whatsapp,
+    address: s.address,
+    student_id_number: s.studentIdNumber || null,
+  };
+}
+
+// Sel tanggal Excel bisa berupa serial number, string YYYY-MM-DD, atau Date.
+// Selalu normalkan ke ISO YYYY-MM-DD agar round-trip export<->import stabil.
+function excelCellToISODate(cell: unknown): string {
+  if (cell === null || cell === undefined || cell === '') return '';
+  if (typeof cell === 'number' && Number.isFinite(cell)) {
+    const parsed = XLSX.SSF.parse_date_code(cell);
+    if (parsed) {
+      const mm = String(parsed.m).padStart(2, '0');
+      const dd = String(parsed.d).padStart(2, '0');
+      return `${parsed.y}-${mm}-${dd}`;
+    }
+    return '';
+  }
+  const raw = cell.toString().trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const d = new Date(raw);
+  if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  return raw;
+}
+
+export function Students({ academicYear: currentAcademicYear, currentUser }: StudentsProps) {
+  const [students, setStudents] = useState<Student[]>([]);
+  const [schools, setSchools] = useState<School[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [schoolFilter, setSchoolFilter] = useState('all');
   const [isImportOpen, setIsImportOpen] = useState(false);
@@ -49,7 +131,11 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
   const [editingStudent, setEditingStudent] = useState<Student | null>(null);
   const [selectedStudent, setSelectedStudent] = useState<Student | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
 
   const schoolNames = useMemo(() => {
     return schools.reduce((acc, s) => {
@@ -57,6 +143,50 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
       return acc;
     }, {} as Record<string, string>);
   }, [schools]);
+
+  // Koordinator dibatasi ke sekolahnya sendiri; dropdown/filter hanya UX,
+  // penegakan scope dilakukan server-side di handler impor (baris sekolah
+  // lain dilewati dan dihitung sebagai skipped).
+  const isKoordinator = currentUser?.role === 'koordinator';
+  const scopedSchoolId = isKoordinator ? currentUser?.schoolId : undefined;
+
+  // Pagination: filter dulu (search/sekolah/scope), baru slice halaman.
+  // Reset ke halaman 1 setiap input filter/scope berubah.
+  useEffect(() => {
+    setPage(1);
+  }, [searchTerm, schoolFilter, scopedSchoolId, currentAcademicYear]);
+
+  const loadStudents = async () => {
+    setIsLoading(true);
+    setLoadError(null);
+    const [schoolRes, studentRes] = await Promise.all([
+      supabase.from('schools').select('id, name, type').order('name', { ascending: true }),
+      supabase.from('students').select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number').order('name', { ascending: true }),
+    ]);
+    if (schoolRes.error || studentRes.error || !schoolRes.data || !studentRes.data) {
+      toast.error('Gagal memuat data siswa. Periksa koneksi dan coba lagi.');
+      setStudents([]);
+      setSchools([]);
+      setLoadError('Gagal memuat data siswa.');
+    } else {
+      setSchools((schoolRes.data as SchoolRefRow[]).map((r) => ({ id: r.id, name: r.name, address: '', coordinatorName: '', phone: '-', type: r.type })));
+      setStudents((studentRes.data as StudentRow[]).map(studentRowToStudent));
+    }
+    setIsLoading(false);
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (cancelled) return;
+      await loadStudents();
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Form state
   const [newName, setNewName] = useState('');
@@ -77,7 +207,6 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
 
   // Real-time calculated age detail from input birth date
   const ageDetail = calculateAgeDetails(newBirthDate);
-  const currentAgeYears = ageDetail.years;
 
   const filteredStudents = students.filter(student => {
     const matchesSearch = student.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -87,7 +216,14 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
     return matchesSearch && matchesSchool;
   });
 
-  const groupedStudents = filteredStudents.reduce((acc, student) => {
+  const totalCount = filteredStudents.length;
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+  const safePage = Math.min(Math.max(page, 1), totalPages);
+  const pageStart = totalCount === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1;
+  const pageEnd = Math.min(safePage * PAGE_SIZE, totalCount);
+  const pagedStudents = filteredStudents.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  const groupedStudents = pagedStudents.reduce((acc, student) => {
     const schoolId = student.schoolId;
     if (!acc[schoolId]) {
       acc[schoolId] = [];
@@ -96,19 +232,41 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
     return acc;
   }, {} as Record<string, Student[]>);
 
-  const handleSaveStudent = () => {
+  const handleSaveStudent = async () => {
+    if (isSaving) return;
     if (!newName || !newSchoolId || !newClass) {
       toast.error("Mohon isi nama, sekolah, dan kelas");
       return;
     }
+    if (newNIK && !/^\d{16}$/.test(newNIK)) {
+      toast.error("NIK harus terdiri dari 16 digit angka");
+      return;
+    }
 
-    const newStudent: Student = {
-      id: Math.random().toString(36).substr(2, 9),
+    setIsSaving(true);
+    try {
+      // NIK dicek ke database (bukan hanya memori) agar duplikat antar sesi ketahuan.
+    if (newNIK) {
+      const { data: nikHit, error: nikError } = await supabase
+        .from('students')
+        .select('id', { count: 'exact', head: false })
+        .eq('nik', newNIK)
+        .limit(1);
+      if (nikError) {
+        toast.error('Gagal memeriksa NIK. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      if (nikHit && nikHit.length > 0) {
+        toast.error("NIK sudah terdaftar untuk siswa lain");
+        return;
+      }
+    }
+
+    const payload = {
       schoolId: newSchoolId,
       name: newName,
       gender: newGender,
       birthDate: newBirthDate,
-      age: currentAgeYears,
       class: newClass,
       nik: newNIK,
       parentName: newParentName,
@@ -124,19 +282,31 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
       studentIdNumber: newNISN,
     };
 
-    const updated = [...students, newStudent];
-    setStudents(updated);
-    saveStudents(updated);
-    toast.success("Siswa berhasil ditambahkan", {
-      description: `${newName} (${ageDetail.formatted}) telah terdaftar.`
-    });
+      const { data, error } = await supabase
+        .from('students')
+        .insert(studentToInsert(payload))
+        .select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number')
+        .single();
+      if (error || !data) {
+        toast.error('Gagal menambahkan siswa. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      const created = studentRowToStudent(data as StudentRow);
+      setStudents((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
+      toast.success("Siswa berhasil ditambahkan", {
+        description: `${newName} (${ageDetail.formatted}) telah terdaftar.`
+      });
 
-    // Reset form
-    resetForm();
-    setIsAddOpen(false);
+      // Reset form
+      resetForm();
+      setIsAddOpen(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleOpenEdit = (student: Student) => {
+    resetForm();
     setEditingStudent(student);
     setNewName(student.name);
     setNewSchoolId(student.schoolId);
@@ -156,45 +326,76 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
     setIsEditOpen(true);
   };
 
-  const handleUpdateStudent = () => {
+  const handleUpdateStudent = async () => {
     if (!editingStudent) return;
     if (!newName || !newSchoolId || !newClass) {
       toast.error("Mohon isi nama, sekolah, dan kelas");
       return;
     }
+    if (newNIK && !/^\d{16}$/.test(newNIK)) {
+      toast.error("NIK harus terdiri dari 16 digit angka");
+      return;
+    }
 
-    const updatedStudent: Student = {
-      ...editingStudent,
-      schoolId: newSchoolId,
-      name: newName,
-      gender: newGender,
-      birthDate: newBirthDate,
-      age: currentAgeYears,
-      class: newClass,
-      nik: newNIK,
-      parentName: newParentName,
-      whatsapp: newWhatsapp,
-      address: {
-        rt: newRT,
-        rw: newRW,
-        desa: newDesa,
-        kecamatan: newKecamatan,
-        kabupaten: newKabupaten,
-        provinsi: newProvinsi,
-      },
-      studentIdNumber: newNISN,
-    };
+    if (newNIK) {
+      const { data: nikHit, error: nikError } = await supabase
+        .from('students')
+        .select('id')
+        .eq('nik', newNIK)
+        .neq('id', editingStudent.id)
+        .limit(1);
+      if (nikError) {
+        toast.error('Gagal memeriksa NIK. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      if (nikHit && nikHit.length > 0) {
+        toast.error("NIK sudah terdaftar untuk siswa lain");
+        return;
+      }
+    }
 
-    const updatedList = students.map(s => s.id === editingStudent.id ? updatedStudent : s);
-    setStudents(updatedList);
-    saveStudents(updatedList);
-    toast.success("Data siswa berhasil diperbarui", {
-      description: `Umur siswa diperbarui otomatis: ${ageDetail.formatted}`
-    });
+    setIsSaving(true);
+    try {
+      const { data, error } = await supabase
+        .from('students')
+        .update(studentToInsert({
+          schoolId: newSchoolId,
+          name: newName,
+          gender: newGender,
+          birthDate: newBirthDate,
+          class: newClass,
+          nik: newNIK,
+          parentName: newParentName,
+          whatsapp: newWhatsapp,
+          address: {
+            rt: newRT,
+            rw: newRW,
+            desa: newDesa,
+            kecamatan: newKecamatan,
+            kabupaten: newKabupaten,
+            provinsi: newProvinsi,
+          },
+          studentIdNumber: newNISN,
+        }))
+        .eq('id', editingStudent.id)
+        .select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number')
+        .single();
+      if (error || !data) {
+        toast.error('Gagal memperbarui siswa. Periksa koneksi dan coba lagi.');
+        return;
+      }
+      const updatedStudent = studentRowToStudent(data as StudentRow);
+      setStudents((prev) => prev.map(s => s.id === editingStudent.id ? updatedStudent : s));
+      toast.success("Data siswa berhasil diperbarui", {
+        description: `Umur siswa diperbarui otomatis: ${ageDetail.formatted}`
+      });
 
-    resetForm();
-    setEditingStudent(null);
-    setIsEditOpen(false);
+      resetForm();
+      setEditingStudent(null);
+      setIsEditOpen(false);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const resetForm = () => {
@@ -215,16 +416,49 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
     setNewProvinsi('');
   };
 
-  const handleDeleteStudent = (id: string, name: string) => {
-    const updated = students.filter(s => s.id !== id);
-    setStudents(updated);
-    saveStudents(updated);
+  const handleDeleteStudent = async (id: string, name: string) => {
+    setIsDeleting(true);
+    try {
+    const [{ count: screeningCount }, { count: ttdCount }] = await Promise.all([
+      supabase.from('screenings').select('id', { count: 'exact', head: true }).eq('student_id', id),
+      supabase.from('ttd_compliance').select('id', { count: 'exact', head: true }).eq('student_id', id),
+    ]);
+    const blockers: string[] = [];
+    if ((screeningCount ?? 0) > 0) blockers.push(`${screeningCount} data pemeriksaan`);
+    if ((ttdCount ?? 0) > 0) blockers.push(`${ttdCount} data TTD`);
+    if (blockers.length > 0) {
+      toast.error(`Tidak dapat menghapus: siswa masih memiliki ${blockers.join(' dan ')}`);
+      return;
+    }
+    const { error } = await supabase.from('students').delete().eq('id', id);
+    if (error) {
+      toast.error('Gagal menghapus siswa. Data mungkin masih dipakai. Coba lagi.');
+      return;
+    }
+    setStudents((prev) => prev.filter(s => s.id !== id));
     toast.success(`Siswa ${name} berhasil dihapus`);
+    } finally {
+      setIsDeleting(false);
+      setDeleteTarget(null);
+    }
   };
 
   const handleViewDetail = (student: Student) => {
     setSelectedStudent(student);
     setIsDetailOpen(true);
+  };
+
+  const resolveImportSchoolId = (cell: unknown): string | null => {
+    const raw = cell?.toString().trim() ?? '';
+    if (!raw) return null;
+    // 1) cocok langsung uuid/id sekolah (hasil export ber-id)
+    const byId = schools.find((s) => s.id === raw);
+    if (byId) return byId.id;
+    // 2) cocok persis nama sekolah (tak peduli kapital)
+    const byName = schools.find((s) => s.name.toLowerCase() === raw.toLowerCase());
+    if (byName) return byName.id;
+    // Tidak dikenal -> null, baris dilewati dengan pesan (tanpa tebakan substring).
+    return null;
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -238,57 +472,135 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
         const wb = XLSX.read(bstr, { type: 'binary' });
         const wsname = wb.SheetNames[0];
         const ws = wb.Sheets[wsname];
-        const data = XLSX.utils.sheet_to_json(ws) as any[];
-        
+        const data = XLSX.utils.sheet_to_json(ws) as Record<string, unknown>[];
+
         if (data.length === 0) {
           toast.error("File kosong atau format tidak sesuai");
           return;
         }
+        if (schools.length === 0) {
+          toast.error("Belum ada data sekolah. Tambahkan sekolah dulu sebelum impor.");
+          return;
+        }
 
-        const newStudents: Student[] = data.map((row: any) => {
-          const birthDate = row['Tanggal Lahir (YYYY-MM-DD)'] || '';
-          const age = calculateAgeYears(birthDate);
-          
-          // Map school name to ID
-          let schoolId = '1';
-          const schoolName = row['Nama Sekolah']?.toString().toLowerCase() || '';
-          if (schoolName.includes('smp')) schoolId = '2';
-          else if (schoolName.includes('sma')) schoolId = '3';
-
-          return {
-            id: Math.random().toString(36).substr(2, 9),
+        const skippedRows: string[] = [];
+        let errorCount = 0;
+        const parsed: {
+          schoolId: string;
+          name: string;
+          gender: 'L' | 'P';
+          birthDate: string;
+          class: string;
+          nik: string;
+          parentName: string;
+          whatsapp: string;
+          address: { rt: string; rw: string; desa: string; kecamatan: string; kabupaten: string; provinsi: string };
+          studentIdNumber: string;
+        }[] = [];
+        data.forEach((row, index) => {
+          const rawSchool = row['Nama Sekolah']?.toString().trim() ?? '';
+          const schoolId = resolveImportSchoolId(row['Nama Sekolah']);
+          if (!schoolId) {
+            skippedRows.push(rawSchool
+              ? `Baris ${index + 1}: sekolah '${rawSchool}' tidak dikenal — buat dulu di menu Sekolah atau perbaiki typo`
+              : `Baris ${index + 1}: sekolah kosong — buat dulu di menu Sekolah atau perbaiki typo`);
+            errorCount++;
+            return;
+          }
+          const rawNik = row['NIK']?.toString().trim() ?? '';
+          if (rawNik && !/^\d{16}$/.test(rawNik)) {
+            skippedRows.push(`Baris ${index + 1}: NIK '${rawNik}' tidak valid — harus 16 digit angka`);
+            errorCount++;
+            return;
+          }
+          parsed.push({
             schoolId,
-            name: row['Nama Siswa'] || 'Unknown',
-            gender: row['Jenis Kelamin (L/P)'] || 'L',
-            birthDate,
-            age,
+            name: row['Nama Siswa']?.toString() || 'Unknown',
+            gender: (row['Jenis Kelamin (L/P)']?.toString() || 'L') as 'L' | 'P',
+            birthDate: excelCellToISODate(row['Tanggal Lahir (YYYY-MM-DD)']),
             class: row['Kelas']?.toString() || '',
-            nik: row['NIK']?.toString() || '',
-            parentName: row['Nama Orang Tua'] || '',
+            nik: rawNik,
+            parentName: row['Nama Orang Tua']?.toString() || '',
             whatsapp: row['Nomor WA']?.toString() || '',
             address: {
               rt: row['RT']?.toString() || '',
               rw: row['RW']?.toString() || '',
-              desa: row['Desa'] || '',
-              kecamatan: row['Kecamatan'] || '',
-              kabupaten: row['Kabupaten'] || '',
-              provinsi: row['Provinsi'] || '',
+              desa: row['Desa']?.toString() || '',
+              kecamatan: row['Kecamatan']?.toString() || '',
+              kabupaten: row['Kabupaten']?.toString() || '',
+              provinsi: row['Provinsi']?.toString() || '',
             },
             studentIdNumber: row['NISN (Opsional)']?.toString() || '',
-          };
+          });
         });
 
-        setStudents(prev => {
-          const updated = [...prev, ...newStudents];
-          saveStudents(updated);
-          return updated;
-        });
-        toast.success(`${newStudents.length} data siswa berhasil diimpor.`, {
-          description: `Data telah ditambahkan ke sistem untuk TA ${currentAcademicYear}.`
-        });
-        setIsImportOpen(false);
-      } catch (error) {
-        console.error(error);
+        void (async () => {
+          setIsImporting(true);
+          try {
+            // Paksa scope koordinator server-side: baris sekolah lain dilewati.
+            const inScope = scopedSchoolId
+              ? parsed.filter((r) => r.schoolId === scopedSchoolId)
+              : parsed;
+            const outOfScope = parsed.length - inScope.length;
+            // Duplikat NIK dalam file dibuang (pakai kemunculan pertama).
+            const seen = new Set<string>();
+            const candidates = inScope.filter((r) => {
+              if (!r.nik) return true;
+              if (seen.has(r.nik)) return false;
+              seen.add(r.nik);
+              return true;
+            });
+            const dupInFile = inScope.length - candidates.length;
+            if (candidates.length === 0) {
+              const emptyReasons = [
+                outOfScope > 0 ? `${outOfScope} baris di luar sekolah Anda` : '',
+                errorCount > 0 ? `${errorCount} baris tidak valid (sekolah/NIK)` : '',
+              ].filter(Boolean).join(', ');
+              toast.error('Tidak ada data valid untuk diimpor.', {
+                description: emptyReasons
+                  ? `${emptyReasons}. ${skippedRows.slice(0, 3).join(' ')}`
+                  : undefined,
+              });
+              return;
+            }
+            // Idempotent: baris ber-NIK di-upsert (NIK UNIQUE → UPDATE bila
+            // sudah ada, INSERT bila baru); baris tanpa NIK selalu INSERT.
+            const withNik = candidates.filter((r) => r.nik !== '');
+            const withoutNik = candidates.filter((r) => r.nik === '');
+            let okCount = 0;
+            if (withNik.length > 0) {
+              const { error: upsertError } = await supabase
+                .from('students')
+                .upsert(withNik.map((r) => studentToInsert(r)), { onConflict: 'nik' });
+              if (upsertError) {
+                toast.error('Gagal mengimpor data siswa. Periksa koneksi dan coba lagi.');
+                return;
+              }
+              okCount += withNik.length;
+            }
+            if (withoutNik.length > 0) {
+              const { error: insertError } = await supabase
+                .from('students')
+                .insert(withoutNik.map((r) => studentToInsert(r)));
+              if (insertError) {
+                toast.error('Gagal mengimpor data siswa tanpa NIK. Periksa koneksi dan coba lagi.');
+                return;
+              }
+              okCount += withoutNik.length;
+            }
+            const skipped = outOfScope + dupInFile + errorCount;
+            await loadStudents();
+            toast.success(`${okCount} data siswa berhasil diimpor.`, {
+              description: skipped > 0
+                ? `${skipped} baris dilewati (di luar scope/duplikat/sekolah tidak dikenal/NIK tidak valid)${errorCount > 0 ? `: ${skippedRows.slice(0, 3).join(' ')}` : ''}. TA ${currentAcademicYear}.`
+                : `Data telah ditambahkan/diperbarui untuk TA ${currentAcademicYear}.`
+            });
+            setIsImportOpen(false);
+          } finally {
+            setIsImporting(false);
+          }
+        })();
+      } catch {
         toast.error("Gagal membaca file", {
           description: "Pastikan format file Excel (.xlsx atau .csv) sudah benar."
         });
@@ -298,8 +610,33 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
     if (e.target) e.target.value = '';
   };
 
-  const downloadTemplate = () => {
-    const template = [
+  const handleExport = () => {
+    // Kolom persis mirror template_import_siswa agar export<->import round-trip.
+    const dataToExport = filteredStudents.map((s) => ({
+      'Nama Sekolah': schoolNames[s.schoolId] ?? '',
+      'Nama Siswa': s.name,
+      'Tanggal Lahir (YYYY-MM-DD)': s.birthDate ? s.birthDate.slice(0, 10) : '',
+      'Jenis Kelamin (L/P)': s.gender,
+      'Kelas': s.class,
+      'NIK': s.nik,
+      'Nama Orang Tua': s.parentName,
+      'Nomor WA': s.whatsapp,
+      'RT': s.address?.rt ?? '',
+      'RW': s.address?.rw ?? '',
+      'Desa': s.address?.desa ?? '',
+      'Kecamatan': s.address?.kecamatan ?? '',
+      'Kabupaten': s.address?.kabupaten ?? '',
+      'Provinsi': s.address?.provinsi ?? '',
+      'NISN (Opsional)': s.studentIdNumber ?? '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(dataToExport);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Data Siswa");
+    XLSX.writeFile(wb, `data-siswa-${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast.success(`Berhasil mengekspor ${dataToExport.length} data siswa`);
+  };
+
+  const downloadTemplate = () => {    const template = [
       { 
         "Nama Sekolah": "SDN 01 Kota",
         "Nama Siswa": "Andi Pratama", 
@@ -379,12 +716,12 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-          <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200">
+          <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200" onClick={handleExport}>
             <Download className="w-4 h-4" /> Export
           </Button>
-          <Dialog open={isAddOpen} onOpenChange={setIsAddOpen}>
+          <Dialog open={isAddOpen} onOpenChange={(open) => { if (!open) resetForm(); setIsAddOpen(open); }}>
             <DialogTrigger asChild>
-              <Button className="gap-2 h-11 px-6 rounded-xl shadow-lg shadow-primary/20">
+              <Button className="gap-2 h-11 px-6 rounded-xl shadow-lg shadow-primary/20" onClick={() => { resetForm(); setEditingStudent(null); }}>
                 <Plus className="w-4 h-4" /> Tambah Siswa
               </Button>
             </DialogTrigger>
@@ -399,7 +736,7 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
                     <Label htmlFor="s_school" className="font-bold text-slate-700">Nama Sekolah</Label>
                     <Select value={newSchoolId} onValueChange={setNewSchoolId}>
                       <SelectTrigger id="s_school" className="rounded-xl border-slate-200">
-                        <SelectValue placeholder="Pilih sekolah" />
+                        <SelectValue placeholder="Pilih sekolah">{schools.find((s) => s.id === newSchoolId)?.name ?? (newSchoolId ? 'Sekolah tidak tersedia' : undefined)}</SelectValue>
                       </SelectTrigger>
                       <SelectContent className="rounded-xl">
                         {schools.map(s => (
@@ -470,10 +807,22 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
                     <Label htmlFor="s_nik" className="font-bold text-slate-700">NIK</Label>
                     <Input 
                       id="s_nik" 
-                      placeholder="Nomor NIK" 
+                      placeholder="Nomor NIK (16 digit)" 
+                      inputMode="numeric"
+                      maxLength={16}
                       className="rounded-xl border-slate-200"
                       value={newNIK}
-                      onChange={(e) => setNewNIK(e.target.value)}
+                      onChange={(e) => setNewNIK(e.target.value.replace(/\D/g, ''))}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="s_nisn" className="font-bold text-slate-700">NISN (Opsional)</Label>
+                    <Input
+                      id="s_nisn"
+                      placeholder="Nomor NISN"
+                      className="rounded-xl border-slate-200"
+                      value={newNISN}
+                      onChange={(e) => setNewNISN(e.target.value)}
                     />
                   </div>
                 </div>
@@ -536,7 +885,7 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
                 </div>
               </div>
               <DialogFooter>
-                <Button onClick={handleSaveStudent} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">Simpan Siswa</Button>
+                <Button onClick={() => void handleSaveStudent()} disabled={isSaving} className="w-full h-12 rounded-xl shadow-lg shadow-primary/20 font-bold text-lg">{isSaving ? 'Menyimpan…' : 'Simpan Siswa'}</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
@@ -557,7 +906,7 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
           <Select value={schoolFilter} onValueChange={setSchoolFilter}>
             <SelectTrigger>
               <Filter className="w-4 h-4 mr-2 text-muted-foreground" />
-              <SelectValue placeholder="Filter Sekolah" />
+              <SelectValue placeholder="Filter Sekolah">{schoolFilter === 'all' ? undefined : (schools.find((s) => s.id === schoolFilter)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Semua Sekolah</SelectItem>
@@ -569,6 +918,18 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
         </div>
       </div>
 
+      {isLoading && (
+        <div className="text-center py-20 bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+          <p className="text-muted-foreground font-medium">Memuat data siswa…</p>
+        </div>
+      )}
+      {!isLoading && loadError && (
+        <div className="text-center py-20 bg-white/30 backdrop-blur-sm rounded-3xl border-2 border-dashed border-slate-200">
+          <p className="text-muted-foreground font-medium mb-3">{loadError}</p>
+          <Button variant="outline" onClick={() => void loadStudents()}>Coba lagi</Button>
+        </div>
+      )}
+      {!isLoading && !loadError && (
       <div className="space-y-8">
         {(Object.entries(groupedStudents) as [string, Student[]][]).length > 0 ? (
           (Object.entries(groupedStudents) as [string, Student[]][]).map(([schoolId, schoolStudents]) => (
@@ -619,27 +980,30 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
                         <TableCell className="text-slate-600 font-medium py-4">{student.class}</TableCell>
                         <TableCell className="text-right py-4">
                           <div className="flex justify-end gap-1">
-                            <Button 
-                              variant="ghost" 
-                              size="sm" 
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              title="Lihat detail"
                               className="rounded-lg font-bold text-primary hover:bg-primary/10"
                               onClick={() => handleViewDetail(student)}
                             >
                               Detail
                             </Button>
-                            <Button 
-                              variant="ghost" 
-                              size="sm" 
-                              className="rounded-lg font-bold text-slate-600 hover:bg-slate-100"
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Edit"
+                              className="h-8 w-8 rounded-lg hover:bg-primary/10 hover:text-primary"
                               onClick={() => handleOpenEdit(student)}
                             >
-                              <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
+                              <Edit className="w-4 h-4" />
                             </Button>
-                            <Button 
-                              variant="ghost" 
-                              size="icon" 
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="Hapus"
                               className="h-8 w-8 rounded-lg text-destructive hover:bg-destructive/10"
-                              onClick={() => handleDeleteStudent(student.id, student.name)}
+                              onClick={() => setDeleteTarget({ id: student.id, name: student.name })}
                             >
                               <Trash2 className="w-4 h-4" />
                             </Button>
@@ -657,7 +1021,18 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
             <p className="text-muted-foreground font-medium">Tidak ada data siswa yang ditemukan.</p>
           </div>
         )}
+        {totalCount > 0 && (
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-2">
+            <p className="text-sm font-medium text-muted-foreground">{pageStart}-{pageEnd} dari {totalCount}</p>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" className="rounded-xl" disabled={safePage <= 1} onClick={() => setPage(safePage - 1)}>Sebelumnya</Button>
+              <span className="text-sm font-bold text-slate-700">{safePage}/{totalPages}</span>
+              <Button variant="outline" size="sm" className="rounded-xl" disabled={safePage >= totalPages} onClick={() => setPage(safePage + 1)}>Berikutnya</Button>
+            </div>
+          </div>
+        )}
       </div>
+      )}
 
       {/* Detail Dialog */}
       <Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
@@ -738,7 +1113,7 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
       </Dialog>
 
       {/* Edit Student Dialog */}
-      <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+      <Dialog open={isEditOpen} onOpenChange={(open) => { if (!open) { resetForm(); setEditingStudent(null); } setIsEditOpen(open); }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Edit Data Siswa</DialogTitle>
@@ -749,8 +1124,8 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
               <div className="grid gap-2">
                 <Label htmlFor="e_school" className="font-bold text-slate-700">Nama Sekolah</Label>
                 <Select value={newSchoolId} onValueChange={setNewSchoolId}>
-                  <SelectTrigger id="e_school" className="rounded-xl border-slate-200">
-                    <SelectValue placeholder="Pilih sekolah" />
+<SelectTrigger id="e_school" className="rounded-xl border-slate-200">
+                        <SelectValue placeholder="Pilih sekolah">{schools.find((s) => s.id === newSchoolId)?.name ?? (newSchoolId ? 'Sekolah tidak tersedia' : undefined)}</SelectValue>
                   </SelectTrigger>
                   <SelectContent className="rounded-xl">
                     {schools.map(s => (
@@ -821,10 +1196,22 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
                 <Label htmlFor="e_nik" className="font-bold text-slate-700">NIK</Label>
                 <Input 
                   id="e_nik" 
-                  placeholder="Nomor NIK" 
+                  placeholder="Nomor NIK (16 digit)" 
+                  inputMode="numeric"
+                  maxLength={16}
                   className="rounded-xl border-slate-200"
                   value={newNIK}
-                  onChange={(e) => setNewNIK(e.target.value)}
+                  onChange={(e) => setNewNIK(e.target.value.replace(/\D/g, ''))}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="e_nisn" className="font-bold text-slate-700">NISN (Opsional)</Label>
+                <Input
+                  id="e_nisn"
+                  placeholder="Nomor NISN"
+                  className="rounded-xl border-slate-200"
+                  value={newNISN}
+                  onChange={(e) => setNewNISN(e.target.value)}
                 />
               </div>
             </div>
@@ -891,6 +1278,14 @@ export function Students({ academicYear: currentAcademicYear }: StudentsProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => { if (!open) setDeleteTarget(null); }}
+        itemName={deleteTarget?.name ?? ''}
+        description={deleteTarget ? `Siswa "${deleteTarget.name}" akan dihapus permanen dan tidak dapat dikembalikan.` : undefined}
+        onConfirm={() => { if (deleteTarget) void handleDeleteStudent(deleteTarget.id, deleteTarget.name); }}
+        isDeleting={isDeleting}
+      />
     </div>
   );
 }
