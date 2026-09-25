@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Plus, Search, Calendar as CalendarIcon, Activity, Eye, Heart, Brain, Baby, ShieldAlert, FileText, Upload, Download, FileSpreadsheet, ExternalLink, CheckCircle2, Clock, XCircle, Trash2, Edit } from 'lucide-react';
+import { Plus, Search, Calendar as CalendarIcon, Activity, Eye, Heart, Brain, Baby, ShieldAlert, FileText, Upload, Download, FileSpreadsheet, ExternalLink, CheckCircle2, Clock, XCircle, Trash2, Edit, ChevronsUpDown, Check } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { 
   Table, 
@@ -33,7 +33,8 @@ import { Screening, Student, School, User } from '@/types';
 import { toast } from 'sonner';
 import { supabase } from '@/lib/supabase';
 import { ConfirmDeleteDialog } from '@/components/ConfirmDeleteDialog';
-import { calculateAgeDetails } from '@/lib/ageUtils';
+import { calculateAgeDetails, calculateAgeYears } from '@/lib/ageUtils';
+import { classifyBP } from '@/lib/bp-classify';
 
 interface ScreeningsProps {
   academicYear: string;
@@ -59,13 +60,18 @@ interface ScreeningRow {
   hearing_right: string | null;
   dental_caries: string | null;
   dental_mouth_health: string | null;
+  caries_count: number | null;
   blood_pressure: string | null;
+  systolic_bp: number | null;
+  diastolic_bp: number | null;
+  bp_category: string | null;
   blood_sugar: string | null;
   tbc_screening: string | null;
   hepatitis_b: string | null;
   hepatitis_c: string | null;
   mental_health_status: string | null;
   reproductive_health: string | null;
+  menstruasi: 'Sudah' | 'Belum' | null;
   smoking_status: string | null;
   immunization_history: string | null;
   anemia_status: string | null;
@@ -103,7 +109,16 @@ interface SchoolRow {
 }
 
 const SCREENING_SELECT =
+  'id, student_id, school_id, academic_year, date, entry_date, student_class, student_gender, height, weight, bmi, physical_activity, vision_left, vision_right, hearing_left, hearing_right, dental_caries, dental_mouth_health, caries_count, blood_pressure, systolic_bp, diastolic_bp, bp_category, blood_sugar, tbc_screening, hepatitis_b, hepatitis_c, mental_health_status, reproductive_health, menstruasi, smoking_status, immunization_history, anemia_status, hb_level, hb_interpretation, notes, created_by, needs_referral, referral_destination, referral_reason, referral_status';
+
+// Kolom pra-migrasi 0007 (tanpa 5 kolom baru: caries_count, systolic_bp,
+// diastolic_bp, bp_category, menstruasi). Dipakai untuk retry bila DB belum dimigrasi.
+const LEGACY_SCREENING_SELECT =
   'id, student_id, school_id, academic_year, date, entry_date, student_class, student_gender, height, weight, bmi, physical_activity, vision_left, vision_right, hearing_left, hearing_right, dental_caries, dental_mouth_health, blood_pressure, blood_sugar, tbc_screening, hepatitis_b, hepatitis_c, mental_health_status, reproductive_health, smoking_status, immunization_history, anemia_status, hb_level, hb_interpretation, notes, created_by, needs_referral, referral_destination, referral_reason, referral_status';
+
+function isMissingColumnError(message: string): boolean {
+  return message.includes('42703') || message.includes('42P01');
+}
 
 // Satu-satunya titik pemetaan snake_case (screenings/students/schools) <->
 // camelCase (Screening/Student/School), mirror TTDCompliance.tsx.
@@ -127,13 +142,18 @@ function screeningRowToModel(row: ScreeningRow): Screening {
     hearingRight: row.hearing_right ?? undefined,
     dentalCaries: row.dental_caries ?? undefined,
     dentalMouthHealth: row.dental_mouth_health ?? undefined,
+    cariesCount: row.caries_count ?? undefined,
     bloodPressure: row.blood_pressure ?? undefined,
+    systolicBP: row.systolic_bp ?? undefined,
+    diastolicBP: row.diastolic_bp ?? undefined,
+    bpCategory: row.bp_category ?? undefined,
     bloodSugar: row.blood_sugar ?? undefined,
     tbcScreening: row.tbc_screening ?? undefined,
     hepatitisB: row.hepatitis_b ?? undefined,
     hepatitisC: row.hepatitis_c ?? undefined,
     mentalHealthStatus: row.mental_health_status ?? undefined,
     reproductiveHealth: row.reproductive_health ?? undefined,
+    menstruasi: row.menstruasi ?? undefined,
     smokingStatus: row.smoking_status ?? undefined,
     immunizationHistory: row.immunization_history ?? undefined,
     anemiaStatus: row.anemia_status ?? undefined,
@@ -166,13 +186,18 @@ function screeningToInsert(s: {
   hearingRight?: string;
   dentalCaries?: string;
   dentalMouthHealth?: string;
+  cariesCount?: number;
   bloodPressure?: string;
+  systolicBP?: number;
+  diastolicBP?: number;
+  bpCategory?: string;
   bloodSugar?: string;
   tbcScreening?: string;
   hepatitisB?: string;
   hepatitisC?: string;
   mentalHealthStatus?: string;
   reproductiveHealth?: string;
+  menstruasi?: 'Sudah' | 'Belum';
   smokingStatus?: string;
   immunizationHistory?: string;
   anemiaStatus?: string;
@@ -203,13 +228,18 @@ function screeningToInsert(s: {
     hearing_right: s.hearingRight ?? null,
     dental_caries: s.dentalCaries ?? null,
     dental_mouth_health: s.dentalMouthHealth ?? null,
+    caries_count: s.cariesCount ?? null,
     blood_pressure: s.bloodPressure ?? null,
+    systolic_bp: s.systolicBP ?? null,
+    diastolic_bp: s.diastolicBP ?? null,
+    bp_category: s.bpCategory ?? null,
     blood_sugar: s.bloodSugar ?? null,
     tbc_screening: s.tbcScreening ?? null,
     hepatitis_b: s.hepatitisB ?? null,
     hepatitis_c: s.hepatitisC ?? null,
     mental_health_status: s.mentalHealthStatus ?? null,
     reproductive_health: s.reproductiveHealth ?? null,
+    menstruasi: s.menstruasi ?? null,
     smoking_status: s.smokingStatus ?? null,
     immunization_history: s.immunizationHistory ?? null,
     anemia_status: s.anemiaStatus ?? null,
@@ -283,6 +313,86 @@ function schoolRowToSchool(row: SchoolRow): School {
   };
 }
 
+function StudentCombobox({ students, value, onChange }: { students: Student[]; value: string; onChange: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [open ]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q === '' ? students : students.filter(s =>
+    s.name.toLowerCase().includes(q) ||
+    (s.nik ?? '').includes(query.trim()) ||
+    (s.class ?? '').toLowerCase().includes(q)
+  );
+  const selected = students.find(s => s.id === value);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <Button
+        type="button"
+        variant="outline"
+        role="combobox"
+        aria-expanded={open}
+        onClick={() => { setQuery(''); setOpen((v) => !v); }}
+        className="w-full justify-between rounded-xl border-slate-200 font-medium"
+      >
+        <span className="truncate">{selected ? `${selected.name} (Kelas ${selected.class})` : 'Pilih siswa'}</span>
+        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+      </Button>
+      {open && (
+        <div className="absolute z-50 mt-1 w-full max-w-[calc(100vw-2rem)] rounded-xl border border-slate-200 bg-white shadow-xl">
+          <div className="relative border-b border-slate-100">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <Input
+              autoFocus
+              placeholder="Cari nama/NIK/kelas…"
+              className="pl-10 rounded-t-xl border-none shadow-none focus-visible:ring-0"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+          <div className="max-h-60 overflow-y-auto p-1">
+            {filtered.length === 0 ? (
+              <p className="px-3 py-6 text-center text-sm font-medium text-slate-500">Siswa tidak ditemukan</p>
+            ) : (
+              filtered.map(s => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => { onChange(s.id); setQuery(''); setOpen(false); }}
+                  className="flex w-full items-center justify-between gap-2 rounded-lg px-3 py-2 text-left hover:bg-slate-50"
+                >
+                  <span className="min-w-0 flex-1 break-words">
+                    <span className="block text-sm font-bold text-slate-800 break-words">{s.name}</span>
+                    <span className="block text-xs font-medium text-slate-500 break-words">Kelas {s.class} • NIK {s.nik || '-'}</span>
+                  </span>
+                  {s.id === value && <Check className="h-4 w-4 shrink-0 text-primary" />}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Screenings({ academicYear: currentAcademicYear, currentUser }: ScreeningsProps) {
   const [screenings, setScreenings] = useState<Screening[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
@@ -306,6 +416,17 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       supabase.from('students').select('id, school_id, name, gender, birth_date, class, nik, parent_name, whatsapp, address, student_id_number'),
       supabase.from('schools').select('id, name, address, coordinator_name, phone, type'),
     ]);
+    // Retry legacy bila migrasi 0007 belum dijalankan (kolom/relasi hilang: 42703/42P01).
+    if (screeningRes.error && isMissingColumnError(screeningRes.error.message ?? '')) {
+      const retryRes = await supabase.from('screenings').select(LEGACY_SCREENING_SELECT);
+      if (!retryRes.error && retryRes.data && !studentRes.error && !schoolRes.error && studentRes.data && schoolRes.data) {
+        toast.error('Database belum diperbarui. Jalankan migrasi 0007 di Supabase SQL Editor.');
+        setScreenings((retryRes.data as ScreeningRow[]).map(screeningRowToModel));
+        setStudents((studentRes.data as StudentRow[]).map(studentRowToStudent));
+        setSchools((schoolRes.data as SchoolRow[]).map(schoolRowToSchool));
+        return;
+      }
+    }
     if (screeningRes.error || studentRes.error || schoolRes.error || !screeningRes.data || !studentRes.data || !schoolRes.data) {
       toast.error('Gagal memuat data pemeriksaan. Periksa koneksi dan coba lagi.');
       setScreenings([]);
@@ -365,7 +486,6 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
   // Form state
   const [schoolId, setSchoolId] = useState('');
   const [studentId, setStudentId] = useState('');
-  const [studentQuery, setStudentQuery] = useState('');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   
   // Status Gizi
@@ -382,9 +502,13 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
   // Gigi
   const [dentalCaries, setDentalCaries] = useState('Tidak Ada');
   const [dentalMouthHealth, setDentalMouthHealth] = useState('Sehat');
+  const [cariesCount, setCariesCount] = useState('');
   
   // Fisik & Penyakit
-  const [bloodPressure, setBloodPressure] = useState('110/70');
+  const [systolicBP, setSystolicBP] = useState('');
+  const [diastolicBP, setDiastolicBP] = useState('');
+  // Nilai legacy bloodPressure ("120/80") — hanya dipertahankan saat edit, tidak pernah ditulis baru.
+  const [legacyBloodPressure, setLegacyBloodPressure] = useState<string | undefined>(undefined);
   const [bloodSugar, setBloodSugar] = useState('90');
   const [tbcScreening, setTbcScreening] = useState('Negatif');
   const [hepatitisB, setHepatitisB] = useState('Negatif');
@@ -399,6 +523,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
   const [immunizationHistory, setImmunizationHistory] = useState('Lengkap');
   const [anemiaStatus, setAnemiaStatus] = useState('Normal');
   const [hbLevel, setHbLevel] = useState('');
+  const [menstruasi, setMenstruasi] = useState('Belum');
   const [notes, setNotes] = useState('');
 
   // Rujukan
@@ -421,6 +546,11 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     }
   };
 
+  const scopedStudents = useMemo(() =>
+    students.filter(s => ((scopedSchoolId ?? schoolId) === '' || s.schoolId === (scopedSchoolId ?? schoolId))),
+    [students, scopedSchoolId, schoolId]
+  );
+
   // Reset student when school changes
   const handleSchoolChange = (id: string) => {
     if (isKoordinator) return;
@@ -437,8 +567,8 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
   const studentClass = selectedStudent?.class || '1';
   const studentGender = selectedStudent?.gender || 'L';
 
-  const bmi = (h: number, w: number) => {
-    if (!h || !w) return 0;
+  const bmi = (h: number, w: number): number | null => {
+    if (!h || !w || h <= 0 || w <= 0) return null;
     const heightInMeters = h / 100;
     return parseFloat((w / (heightInMeters * heightInMeters)).toFixed(1));
   };
@@ -455,11 +585,15 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
 
   const hbInterpretation = getHbInterpretation(Number(hbLevel));
 
+  // Klasifikasi TD live: usia dari birthDate (tanpa birthDate → null → tanpa label),
+  // jenis kelamin null → ambang paling sensitif (di dalam classifyBP).
+  const liveBPAge = selectedStudent?.birthDate ? calculateAgeYears(selectedStudent.birthDate) : null;
+  const liveBPResult = classifyBP(liveBPAge, Number(systolicBP), Number(diastolicBP), selectedStudent?.gender ?? null);
+
   const resetForm = () => {
     setEditingId(null);
     setSchoolId('');
     setStudentId('');
-    setStudentQuery('');
     setDate(new Date().toISOString().split('T')[0]);
     setHeight('');
     setWeight('');
@@ -470,7 +604,10 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     setHearingRight('Normal');
     setDentalCaries('Tidak Ada');
     setDentalMouthHealth('Sehat');
-    setBloodPressure('110/70');
+    setCariesCount('');
+    setSystolicBP('');
+    setDiastolicBP('');
+    setLegacyBloodPressure(undefined);
     setBloodSugar('90');
     setTbcScreening('Negatif');
     setHepatitisB('Negatif');
@@ -481,6 +618,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     setImmunizationHistory('Lengkap');
     setAnemiaStatus('Normal');
     setHbLevel('');
+    setMenstruasi('Belum');
     setNotes('');
     setNeedsReferral('Tidak');
     setReferralDestination('Puskesmas');
@@ -493,7 +631,6 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     setEditingId(screening.id);
     setSchoolId(screening.schoolId || student?.schoolId || '');
     setStudentId(screening.studentId || '');
-    setStudentQuery('');
     setDate(screening.date ? new Date(screening.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
     setHeight(String(screening.height ?? ''));
     setWeight(String(screening.weight ?? ''));
@@ -504,7 +641,10 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     setHearingRight(screening.hearingRight || 'Normal');
     setDentalCaries(screening.dentalCaries || 'Tidak Ada');
     setDentalMouthHealth(screening.dentalMouthHealth || 'Sehat');
-    setBloodPressure(screening.bloodPressure || '110/70');
+    setCariesCount(screening.cariesCount !== undefined && screening.cariesCount !== null ? String(screening.cariesCount) : '');
+    setSystolicBP(screening.systolicBP !== undefined && screening.systolicBP !== null ? String(screening.systolicBP) : '');
+    setDiastolicBP(screening.diastolicBP !== undefined && screening.diastolicBP !== null ? String(screening.diastolicBP) : '');
+    setLegacyBloodPressure(screening.bloodPressure || undefined);
     setBloodSugar(screening.bloodSugar || '90');
     setTbcScreening(screening.tbcScreening || 'Negatif');
     setHepatitisB(screening.hepatitisB || 'Negatif');
@@ -515,6 +655,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     setImmunizationHistory(screening.immunizationHistory || 'Lengkap');
     setAnemiaStatus(screening.anemiaStatus || 'Normal');
     setHbLevel(screening.hbLevel !== undefined && screening.hbLevel !== null ? String(screening.hbLevel) : '');
+    setMenstruasi(screening.menstruasi || 'Belum');
     setNotes(screening.notes || '');
     setNeedsReferral(screening.needsReferral ? 'Ya' : 'Tidak');
     setReferralDestination(screening.referralDestination || 'Puskesmas');
@@ -526,9 +667,19 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
   const handleSaveScreening = async () => {
     if (isSaving) return;
     const effectiveSchoolId = scopedSchoolId ?? schoolId;
-    if (!effectiveSchoolId || !studentId || !height || !weight) {
-      toast.error("Mohon lengkapi data pemeriksaan utama (Sekolah, Siswa, TB, BB)");
+    if (!effectiveSchoolId || !studentId) {
+      toast.error("Mohon pilih Sekolah dan Siswa");
       return;
+    }
+
+    const isRemajaPutri = studentGender === 'P' && ((schoolType === 'SMP' && studentClass === '7') || (schoolType === 'SMA' && studentClass === '10'));
+    const isPutri = studentGender === 'P';
+    if (dentalCaries === 'Ada') {
+      const n = Number(cariesCount);
+      if (!cariesCount || !Number.isInteger(n) || n < 1 || n > 32) {
+        toast.error("Jumlah karies 1–32");
+        return;
+      }
     }
 
     const record: Omit<Screening, 'id' | 'entryDate' | 'createdBy' | 'academicYear'> & { academicYear: string } = {
@@ -538,9 +689,9 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       studentClass,
       studentGender,
       date: new Date(date).toISOString(),
-      height: Number(height),
-      weight: Number(weight),
-      bmi: calculatedBmi,
+      height: height ? Number(height) : 0,
+      weight: weight ? Number(weight) : 0,
+      bmi: calculatedBmi ?? 0,
       physicalActivity,
       visionLeft,
       visionRight,
@@ -548,13 +699,18 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       hearingRight,
       dentalCaries,
       dentalMouthHealth,
-      bloodPressure,
+      cariesCount: dentalCaries === 'Ada' ? Number(cariesCount) : undefined,
+      bloodPressure: legacyBloodPressure,
+      systolicBP: systolicBP ? Number(systolicBP) : undefined,
+      diastolicBP: diastolicBP ? Number(diastolicBP) : undefined,
+      bpCategory: liveBPResult ? `Sistolik: ${liveBPResult.sysLabel}; Diastolik: ${liveBPResult.diaLabel}` : undefined,
       bloodSugar,
       tbcScreening,
       hepatitisB,
       hepatitisC,
       mentalHealthStatus,
       reproductiveHealth,
+      menstruasi: isPutri ? (menstruasi as 'Sudah' | 'Belum') : undefined,
       smokingStatus,
       immunizationHistory,
       anemiaStatus,
@@ -669,10 +825,15 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     const dataToExport = filteredScreenings.map((s) => ({
       'NIK Siswa': students.find((st) => st.id === s.studentId)?.nik ?? '',
       'Nama Siswa': s.studentName,
+      'Sekolah': s.schoolName,
       'Tanggal (YYYY-MM-DD)': s.date ? s.date.slice(0, 10) : '',
-      'Tinggi Badan (cm)': s.height,
-      'Berat Badan (kg)': s.weight,
+      'Tinggi Badan (cm)': s.height || '',
+      'Berat Badan (kg)': s.weight || '',
+      'BMI': s.bmi || '-',
       'Tekanan Darah': s.bloodPressure ?? '',
+      'Sistolik': s.systolicBP ?? '-',
+      'Diastolik': s.diastolicBP ?? '-',
+      'Kategori TD': s.bpCategory ?? '-',
       'Gula Darah': s.bloodSugar ?? '',
       'Kadar HB': s.hbLevel ?? '',
       'Visi Kiri': s.visionLeft ?? '',
@@ -680,12 +841,14 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       'Pendengaran Kiri': s.hearingLeft ?? '',
       'Pendengaran Kanan': s.hearingRight ?? '',
       'Karies Gigi': s.dentalCaries ?? '',
+      'Jumlah Karies': s.cariesCount ?? '-',
       'Kesehatan Mulut': s.dentalMouthHealth ?? '',
       'Skrining TBC': s.tbcScreening ?? '',
       'Hepatitis B': s.hepatitisB ?? '',
       'Hepatitis C': s.hepatitisC ?? '',
       'Kesehatan Mental': s.mentalHealthStatus ?? '',
       'Kesehatan Reproduksi': s.reproductiveHealth ?? '',
+      'Menstruasi': s.menstruasi ?? '-',
       'Merokok': s.smokingStatus ?? '',
       'Aktivitas Fisik': s.physicalActivity ?? '',
       'Riwayat Imunisasi': s.immunizationHistory ?? '',
@@ -706,10 +869,13 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       {
         'NIK Siswa': '3201011205150001',
         'Nama Siswa': 'Andi Pratama',
+        'Sekolah': 'SDN Baruharjo 1',
         'Tanggal (YYYY-MM-DD)': '2024-03-15',
         'Tinggi Badan (cm)': '140',
         'Berat Badan (kg)': '35',
         'Tekanan Darah': '110/70',
+        'Sistolik': '110',
+        'Diastolik': '70',
         'Gula Darah': '90',
         'Kadar HB': '12.5',
         'Visi Kiri': 'Normal',
@@ -717,12 +883,14 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
         'Pendengaran Kiri': 'Normal',
         'Pendengaran Kanan': 'Normal',
         'Karies Gigi': 'Tidak Ada',
+        'Jumlah Karies': '',
         'Kesehatan Mulut': 'Sehat',
         'Skrining TBC': 'Negatif',
         'Hepatitis B': 'Negatif',
         'Hepatitis C': 'Negatif',
         'Kesehatan Mental': 'Stabil',
         'Kesehatan Reproduksi': 'Sehat',
+        'Menstruasi': '',
         'Merokok': 'Tidak Merokok',
         'Aktivitas Fisik': 'Aktif',
         'Riwayat Imunisasi': 'Lengkap',
@@ -761,25 +929,114 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
         const skippedRows: string[] = [];
 
         data.forEach((row, index) => {
-          // Find student by NIK or Name
-          const nik = row['NIK Siswa']?.toString();
-          const name = row['Nama Siswa']?.toString();
-          const student = students.find(s => (nik && s.nik === nik) || (name && s.name.toLowerCase() === name.toLowerCase()));
+          const rowNo = index + 1;
 
-          if (!student) {
-            skippedRows.push(`Baris ${index + 1}: Siswa tidak ditemukan (${name || nik || 'tanpa identitas'})`);
-            return;
+          // --- Resolusi sekolah: koordinator -> sekolah sendiri; admin -> kolom 'Sekolah' ---
+          let resolvedSchoolId: string | undefined;
+          if (scopedSchoolId) {
+            resolvedSchoolId = scopedSchoolId;
+          } else {
+            const schoolCell = row['Sekolah']?.toString().trim() ?? '';
+            if (!schoolCell) {
+              skippedRows.push(`Baris ${rowNo}: Sekolah tidak dikenali (kolom 'Sekolah' kosong)`);
+              return;
+            }
+            const cellLower = schoolCell.toLowerCase();
+            const matches = schools.filter((s) => s.name.toLowerCase().includes(cellLower));
+            if (matches.length !== 1) {
+              skippedRows.push(`Baris ${rowNo}: Sekolah tidak dikenali ('${schoolCell}')`);
+              return;
+            }
+            resolvedSchoolId = matches[0].id;
           }
 
-          const h = parseStrictNumber(row['Tinggi Badan (cm)']);
-          const w = parseStrictNumber(row['Berat Badan (kg)']);
+          // --- Pencocokan siswa: NIK dulu; bila NIK kosong -> Nama (persis, case-insensitive) + sekolah ---
+          const rawNik = row['NIK Siswa']?.toString().trim() ?? '';
+          const name = row['Nama Siswa']?.toString().trim() ?? '';
+          let student: Student | undefined;
+          if (rawNik) {
+            student = students.find((s) => s.nik === rawNik);
+            if (!student) {
+              skippedRows.push(`Baris ${rowNo}: Siswa tidak ditemukan (NIK '${rawNik}')`);
+              return;
+            }
+          } else {
+            if (!name) {
+              skippedRows.push(`Baris ${rowNo}: Siswa tidak ditemukan (tanpa NIK/nama)`);
+              return;
+            }
+            student = students.find(
+              (s) => s.name.toLowerCase() === name.toLowerCase() && s.schoolId === resolvedSchoolId
+            );
+            if (!student) {
+              skippedRows.push(`Baris ${rowNo}: Siswa tidak ditemukan (nama '${name}' di sekolah tersebut)`);
+              return;
+            }
+          }
+
+          // --- TB/BB opsional (T3): kosong -> 0 (tampil '-'); terisi tapi non-numerik -> skip ---
+          const hRaw = row['Tinggi Badan (cm)'];
+          const wRaw = row['Berat Badan (kg)'];
+          const hPresent = hRaw !== null && hRaw !== undefined && hRaw.toString().trim() !== '';
+          const wPresent = wRaw !== null && wRaw !== undefined && wRaw.toString().trim() !== '';
+          const h = parseStrictNumber(hRaw);
+          const w = parseStrictNumber(wRaw);
+          if ((hPresent && (h === null || h <= 0)) || (wPresent && (w === null || w <= 0))) {
+            const badCol = hPresent && (h === null || h <= 0) ? 'Tinggi Badan (cm)' : 'Berat Badan (kg)';
+            skippedRows.push(`Baris ${rowNo}: ${badCol} tidak valid ('${row[badCol]}')`);
+            return;
+          }
           const hb = parseStrictNumber(row['Kadar HB']);
-          if (h === null || w === null || h <= 0 || w <= 0) {
-            skippedRows.push(`Baris ${index + 1}: Tinggi/Berat Badan kosong atau tidak valid`);
+
+          // --- Sistolik/Diastolik: hanya dibaca bila kolom ada & terisi (tanda '-' ekspor = kosong) ---
+          const sysRaw = row['Sistolik'];
+          const diaRaw = row['Diastolik'];
+          const sysPresent = sysRaw !== null && sysRaw !== undefined && sysRaw.toString().trim() !== '' && sysRaw.toString().trim() !== '-';
+          const diaPresent = diaRaw !== null && diaRaw !== undefined && diaRaw.toString().trim() !== '' && diaRaw.toString().trim() !== '-';
+          const sys = sysPresent ? parseStrictNumber(sysRaw) : null;
+          const dia = diaPresent ? parseStrictNumber(diaRaw) : null;
+          if (sysPresent && (sys === null || sys < 40 || sys > 300)) {
+            skippedRows.push(`Baris ${rowNo}: Sistolik tidak valid ('${sysRaw}') — harus angka 40–300`);
             return;
           }
+          if (diaPresent && (dia === null || dia < 20 || dia > 200)) {
+            skippedRows.push(`Baris ${rowNo}: Diastolik tidak valid ('${diaRaw}') — harus angka 20–200`);
+            return;
+          }
+          const bpAge = student.birthDate ? calculateAgeYears(student.birthDate) : null;
+          const bpResult = sys !== null && dia !== null
+            ? classifyBP(bpAge, sys, dia, student.gender ?? null)
+            : null;
 
-          const calculatedBmiValue = bmi(h, w);
+          // --- Menstruasi: Sudah/Belum apa adanya (gating putri berlaku di form) ---
+          const mensRaw = row['Menstruasi']?.toString().trim() ?? '';
+          const menstruasi = mensRaw === 'Sudah' || mensRaw === 'Belum' ? mensRaw : undefined;
+
+          // --- Visi: petakan ke Normal/Indikasi Gangguan, default Normal ---
+          const mapVision = (cell: unknown): string => {
+            const t = cell?.toString().trim().toLowerCase() ?? '';
+            if (t === '' || t === '-') return 'Normal';
+            if (t.includes('gangguan') || t.includes('indikasi') || t === 'tidak normal' || t === 'abnormal') return 'Indikasi Gangguan';
+            return 'Normal';
+          };
+
+          // --- Jumlah Karies 1–32 bila Karies Ada ---
+          const dentalCariesVal: string = row['Karies Gigi'] || 'Tidak Ada';
+          const cariesRaw = row['Jumlah Karies'];
+          const cariesPresent = cariesRaw !== null && cariesRaw !== undefined && cariesRaw.toString().trim() !== '' && cariesRaw.toString().trim() !== '-';
+          let cariesCountVal: number | undefined;
+          if (dentalCariesVal === 'Ada' && cariesPresent) {
+            const n = parseStrictNumber(cariesRaw);
+            if (n === null || !Number.isInteger(n) || n < 1 || n > 32) {
+              skippedRows.push(`Baris ${rowNo}: Jumlah Karies tidak valid ('${cariesRaw}') — harus angka bulat 1–32`);
+              return;
+            }
+            cariesCountVal = n;
+          }
+
+          const heightVal = h ?? 0;
+          const weightVal = w ?? 0;
+          const calculatedBmiValue = bmi(heightVal, weightVal);
           const hbInterp = hb === null ? '-' : getHbInterpretation(hb);
 
           const record = {
@@ -793,23 +1050,28 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
             studentGender: student.gender,
             date: excelCellToISODate(row['Tanggal (YYYY-MM-DD)']) || new Date().toISOString().slice(0, 10),
             entryDate: new Date().toISOString(),
-            height: h,
-            weight: w,
-            bmi: calculatedBmiValue,
+            height: heightVal,
+            weight: weightVal,
+            bmi: calculatedBmiValue ?? 0,
             physicalActivity: row['Aktivitas Fisik'] || 'Aktif',
-            visionLeft: row['Visi Kiri'] || 'Normal',
-            visionRight: row['Visi Kanan'] || 'Normal',
+            visionLeft: mapVision(row['Visi Kiri']),
+            visionRight: mapVision(row['Visi Kanan']),
             hearingLeft: row['Pendengaran Kiri'] || 'Normal',
             hearingRight: row['Pendengaran Kanan'] || 'Normal',
-            dentalCaries: row['Karies Gigi'] || 'Tidak Ada',
+            dentalCaries: dentalCariesVal,
             dentalMouthHealth: row['Kesehatan Mulut'] || 'Sehat',
+            cariesCount: cariesCountVal,
             bloodPressure: row['Tekanan Darah'] || '110/70',
+            systolicBP: sys ?? undefined,
+            diastolicBP: dia ?? undefined,
+            bpCategory: bpResult ? `Sistolik: ${bpResult.sysLabel}; Diastolik: ${bpResult.diaLabel}` : undefined,
             bloodSugar: row['Gula Darah'] || '90',
             tbcScreening: row['Skrining TBC'] || 'Negatif',
             hepatitisB: row['Hepatitis B'] || 'Negatif',
             hepatitisC: row['Hepatitis C'] || 'Negatif',
             mentalHealthStatus: row['Kesehatan Mental'] || 'Stabil',
             reproductiveHealth: row['Kesehatan Reproduksi'] || 'Sehat',
+            menstruasi,
             smokingStatus: row['Merokok'] || 'Tidak Merokok',
             immunizationHistory: row['Riwayat Imunisasi'] || 'Lengkap',
             anemiaStatus: hbInterp === 'Normal' ? 'Normal' : 'Anemia',
@@ -876,7 +1138,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Pemeriksaan Kesehatan</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {currentAcademicYear}
@@ -884,14 +1146,14 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
           </div>
           <p className="text-muted-foreground font-medium">Catat dan pantau hasil pemeriksaan berkala siswa.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
             <DialogTrigger asChild>
               <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200 hover:bg-primary/5 hover:text-primary transition-all">
                 <Upload className="w-4 h-4" /> Import Excel
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-md rounded-3xl border-none shadow-2xl">
+            <DialogContent className="max-h-[90vh] overflow-y-auto max-w-md sm:max-w-md rounded-3xl border-none shadow-2xl">
               <DialogHeader>
                 <DialogTitle className="text-2xl font-bold text-primary">Import Data Pemeriksaan</DialogTitle>
                 <DialogDescription className="font-medium">Unggah file Excel (.xlsx) atau CSV untuk mengimpor data pemeriksaan secara massal.</DialogDescription>
@@ -931,13 +1193,13 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
             <Download className="w-4 h-4" /> Export
           </Button>
 
-          <Dialog open={isOpen} onOpenChange={(open) => { if (!open) setStudentQuery(''); setIsOpen(open); }}>
+          <Dialog open={isOpen} onOpenChange={setIsOpen}>
             <DialogTrigger asChild>
               <Button className="gap-2 h-11 px-6 rounded-xl shadow-lg shadow-primary/20" onClick={() => resetForm()}>
                 <Plus className="w-4 h-4" /> Catat Pemeriksaan
               </Button>
             </DialogTrigger>
-          <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
+          <DialogContent className="max-w-4xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
             <DialogHeader>
               <DialogTitle className="text-2xl font-bold text-primary">{editingId ? 'Edit Hasil Pemeriksaan' : 'Catat Hasil Pemeriksaan'}</DialogTitle>
               <DialogDescription className="font-medium">Masukkan data kesehatan hasil pemeriksaan siswa untuk Tahun Ajaran {currentAcademicYear}.</DialogDescription>
@@ -948,7 +1210,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 <h3 className="text-sm font-bold text-slate-800 border-b pb-1 flex items-center gap-2">
                   <Activity className="w-4 h-4 text-primary" /> Identitas & Waktu
                 </h3>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Sekolah</Label>
                     <Select value={scopedSchoolId ?? schoolId} onValueChange={handleSchoolChange} disabled={isKoordinator}>
@@ -964,25 +1226,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                   </div>
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Siswa</Label>
-                    <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                      <Input
-                        placeholder="Cari nama/NIK/kelas…"
-                        className="pl-10 rounded-xl border-slate-200"
-                        value={studentQuery}
-                        onChange={(e) => setStudentQuery(e.target.value)}
-                      />
-                    </div>
-                    <Select value={studentId} onValueChange={handleStudentChange}>
-                      <SelectTrigger className="rounded-xl border-slate-200">
-                        <SelectValue placeholder="Pilih siswa">{students.find((s) => s.id === studentId)?.name ?? (studentId ? 'Siswa tidak tersedia' : undefined)}</SelectValue>
-                      </SelectTrigger>
-                      <SelectContent className="rounded-xl">
-                        {students.filter(s => ((scopedSchoolId ?? schoolId) === '' || s.schoolId === (scopedSchoolId ?? schoolId)) && (studentQuery.trim() === '' || s.name.toLowerCase().includes(studentQuery.trim().toLowerCase()) || (s.nik ?? '').includes(studentQuery.trim()) || (s.class ?? '').toLowerCase().includes(studentQuery.trim().toLowerCase()))).map(s => (
-                          <SelectItem key={s.id} value={s.id}>{s.name} (Kelas {s.class})</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                    <StudentCombobox students={scopedStudents} value={studentId} onChange={handleStudentChange} />
                   </div>
                 </div>
 
@@ -994,7 +1238,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs font-medium flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Clock className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span><strong>Tgl Lahir:</strong> {selStudent.birthDate ? new Date(selStudent.birthDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Belum diisi'}</span>
+                        <span><strong>Tgl Lahir:</strong> {selStudent.birthDate ? new Date(selStudent.birthDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'numeric', year: 'numeric' }) : 'Belum diisi'}</span>
                       </div>
                       <span className="font-bold bg-emerald-100 text-emerald-800 px-2.5 py-1 rounded-lg">
                         Usia: {ageInfo ? ageInfo.formatted : `${selStudent.age || 0} Tahun`}
@@ -1002,7 +1246,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </div>
                   );
                 })()}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Tanggal Pemeriksaan</Label>
                     <Input type="date" className="rounded-xl border-slate-200" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -1057,23 +1301,39 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 <h3 className="text-sm font-bold text-slate-800 border-b pb-1 flex items-center gap-2">
                   <Eye className="w-4 h-4 text-primary" /> Indera, Gigi & Mulut
                 </h3>
-                <div className="grid grid-cols-2 gap-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-slate-500 uppercase">Tajam Penglihatan (Mata)</Label>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <div className="grid gap-1">
                         <span className="text-[10px] font-bold text-muted-foreground uppercase">Kiri</span>
-                        <Input placeholder="Kiri" value={visionLeft} onChange={(e) => setVisionLeft(e.target.value)} className="rounded-xl" />
+                        <Select value={visionLeft} onValueChange={setVisionLeft}>
+                          <SelectTrigger className="rounded-xl">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="Normal">Normal (visus 6/6–6/9)</SelectItem>
+                            <SelectItem value="Indikasi Gangguan">Indikasi gangguan (visus &lt; 6/9)</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
                       <div className="grid gap-1">
                         <span className="text-[10px] font-bold text-muted-foreground uppercase">Kanan</span>
-                        <Input placeholder="Kanan" value={visionRight} onChange={(e) => setVisionRight(e.target.value)} className="rounded-xl" />
+                        <Select value={visionRight} onValueChange={setVisionRight}>
+                          <SelectTrigger className="rounded-xl">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="Normal">Normal (visus 6/6–6/9)</SelectItem>
+                            <SelectItem value="Indikasi Gangguan">Indikasi gangguan (visus &lt; 6/9)</SelectItem>
+                          </SelectContent>
+                        </Select>
                       </div>
                     </div>
                   </div>
                   <div className="space-y-3">
                     <Label className="text-xs font-bold text-slate-500 uppercase">Tajam Pendengaran (Telinga)</Label>
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                       <div className="grid gap-1">
                         <span className="text-[10px] font-bold text-muted-foreground uppercase">Kiri</span>
                         <Input placeholder="Kiri" value={hearingLeft} onChange={(e) => setHearingLeft(e.target.value)} className="rounded-xl" />
@@ -1085,7 +1345,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </div>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Pemeriksaan Karies</Label>
                     <Select value={dentalCaries} onValueChange={setDentalCaries}>
@@ -1111,6 +1371,20 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </Select>
                   </div>
                 </div>
+                {dentalCaries === 'Ada' && (
+                  <div className="grid gap-2">
+                    <Label className="font-bold text-slate-700">Jumlah Karies</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={32}
+                      placeholder="1–32"
+                      value={cariesCount}
+                      onChange={(e) => setCariesCount(e.target.value)}
+                      className="rounded-xl"
+                    />
+                  </div>
+                )}
               </div>
 
               {/* Fisik & Penyakit Section */}
@@ -1118,11 +1392,48 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 <h3 className="text-sm font-bold text-slate-800 border-b pb-1 flex items-center gap-2">
                   <Heart className="w-4 h-4 text-primary" /> Fisik & Penyakit
                 </h3>
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
-                    <Label className="font-bold text-slate-700">Tekanan Darah</Label>
-                    <Input placeholder="120/80" value={bloodPressure} onChange={(e) => setBloodPressure(e.target.value)} className="rounded-xl" />
+                    <Label className="font-bold text-slate-700">Sistolik (mmHg)</Label>
+                    <Input type="number" min={0} placeholder="110" value={systolicBP} onChange={(e) => setSystolicBP(e.target.value)} className="rounded-xl" />
+                    <div className="h-6 flex items-center">
+                      {liveBPResult ? (
+                        <Badge variant="outline" className={`text-[11px] font-bold ${
+                          liveBPResult.sysLabel === 'Normal'
+                            ? 'text-emerald-600 border-emerald-200 bg-emerald-50'
+                            : liveBPResult.sysLabel === 'Tinggi'
+                              ? 'text-amber-600 border-amber-200 bg-amber-50'
+                              : 'text-sky-600 border-sky-200 bg-sky-50'
+                        }`}>
+                          Sistolik: {liveBPResult.sysLabel}
+                        </Badge>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">—</span>
+                      )}
+                    </div>
                   </div>
+                  <div className="grid gap-2">
+                    <Label className="font-bold text-slate-700">Diastolik (mmHg)</Label>
+                    <Input type="number" min={0} placeholder="70" value={diastolicBP} onChange={(e) => setDiastolicBP(e.target.value)} className="rounded-xl" />
+                    <div className="h-6 flex items-center">
+                      {liveBPResult ? (
+                        <Badge variant="outline" className={`text-[11px] font-bold ${
+                          liveBPResult.diaLabel === 'Normal'
+                            ? 'text-emerald-600 border-emerald-200 bg-emerald-50'
+                            : liveBPResult.diaLabel === 'Tinggi'
+                              ? 'text-amber-600 border-amber-200 bg-amber-50'
+                              : 'text-sky-600 border-sky-200 bg-sky-50'
+                        }`}>
+                          Diastolik: {liveBPResult.diaLabel}
+                        </Badge>
+                      ) : (
+                        <span className="text-[11px] text-slate-400">—</span>
+                      )}
+                    </div>
+                  </div>
+                  {legacyBloodPressure && (
+                    <p className="col-span-3 text-[11px] text-slate-400">Data lama: {legacyBloodPressure} (dipertahankan apa adanya)</p>
+                  )}
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Gula Darah (Diabetes)</Label>
                     <Input placeholder="mg/dL" value={bloodSugar} onChange={(e) => setBloodSugar(e.target.value)} className="rounded-xl" />
@@ -1140,7 +1451,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </Select>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Hepatitis B</Label>
                     <Select value={hepatitisB} onValueChange={setHepatitisB}>
@@ -1168,7 +1479,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </div>
                   )}
                 </div>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Kadar HB Darah (mg/dL)</Label>
                     <Input 
@@ -1218,7 +1529,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 <h3 className="text-sm font-bold text-slate-800 border-b pb-1 flex items-center gap-2">
                   <ShieldAlert className="w-4 h-4 text-primary" /> Pemeriksaan Khusus
                 </h3>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {/* Reproductive Health: SD (4-6), SMP, SMA */}
                   {((schoolType === 'SD' && Number(studentClass) >= 4) || schoolType !== 'SD') && (
                     <div className="grid gap-2">
@@ -1283,6 +1594,22 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                       </Select>
                     </div>
                   )}
+
+                  {/* Menstruasi: all female students (gender P) */}
+                  {studentGender === 'P' && (
+                    <div className="grid gap-2">
+                      <Label className="font-bold text-slate-700">Menstruasi</Label>
+                      <Select value={menstruasi} onValueChange={setMenstruasi}>
+                        <SelectTrigger className="rounded-xl">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Sudah">Sudah</SelectItem>
+                          <SelectItem value="Belum">Belum</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1291,7 +1618,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 <h3 className="text-sm font-bold text-slate-800 border-b pb-1 flex items-center gap-2">
                   <ExternalLink className="w-4 h-4 text-primary" /> Rujukan (Jika Diperlukan)
                 </h3>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Perlu Rujukan?</Label>
                     <Select value={needsReferral} onValueChange={setNeedsReferral}>
@@ -1376,7 +1703,8 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
       </div>
 
       <div className="border-none rounded-2xl bg-white/50 backdrop-blur-sm shadow-sm overflow-hidden">
-        <Table>
+        <div className="overflow-x-auto">
+        <Table className="min-w-[720px]">
           <TableHeader className="bg-slate-50/50">
             <TableRow className="hover:bg-transparent border-slate-100">
               <TableHead className="font-bold text-muted-foreground uppercase tracking-wider text-[10px] py-4">Tgl Periksa</TableHead>
@@ -1407,17 +1735,21 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     {screening.schoolType} - Kls {screening.studentClass}
                   </Badge>
                 </TableCell>
-                <TableCell className="text-slate-500 font-mono text-xs py-4">{screening.height}/{screening.weight}</TableCell>
+                <TableCell className="text-slate-500 font-mono text-xs py-4">{screening.height || '-'}/{screening.weight || '-'}</TableCell>
                 <TableCell className="py-4">
                   <div className="flex items-center gap-2 font-bold text-primary">
                     <Activity className="w-4 h-4" />
-                    {screening.bmi}
+                    {screening.bmi || '-'}
                   </div>
                 </TableCell>
                 <TableCell className="py-4">
+                  {!screening.bmi ? (
+                    <span className="text-[10px] text-slate-400 font-bold uppercase">-</span>
+                  ) : (
                   <Badge variant={screening.bmi > 25 ? 'destructive' : screening.bmi < 18.5 ? 'outline' : 'secondary'} className="rounded-md px-2 py-0.5 text-[10px] font-bold">
                     {screening.bmi > 25 ? 'Gemuk' : screening.bmi < 18.5 ? 'Kurus' : 'Normal'}
                   </Badge>
+                  )}
                 </TableCell>
                 <TableCell className="py-4">
                   {screening.needsReferral ? (
@@ -1464,6 +1796,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
             ))}
           </TableBody>
         </Table>
+        </div>
       </div>
 
       {totalCount > 0 && (
@@ -1479,7 +1812,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
 
       {/* Detail Dialog */}
       <Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
-        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
+        <DialogContent className="max-w-3xl sm:max-w-3xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Detail Hasil Pemeriksaan</DialogTitle>
             <DialogDescription className="font-medium">Informasi lengkap hasil pemeriksaan kesehatan siswa.</DialogDescription>
@@ -1494,27 +1827,39 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 </div>
                 <div className="text-right">
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Tanggal Periksa</p>
-                  <p className="text-sm font-bold text-slate-700">{new Date(selectedScreening.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}</p>
+                  <p className="text-sm font-bold text-slate-700">{new Date(selectedScreening.date).toLocaleDateString('id-ID', { day: 'numeric', month: 'numeric', year: 'numeric' })}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <h4 className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
                     <Activity className="w-4 h-4" /> Status Gizi & Fisik
                   </h4>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Tinggi/Berat</p>
                       <p className="text-sm font-bold text-slate-800">{selectedScreening.height}cm / {selectedScreening.weight}kg</p>
                     </div>
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">BMI</p>
-                      <p className="text-sm font-bold text-primary">{selectedScreening.bmi}</p>
+                      <p className="text-sm font-bold text-primary">{selectedScreening.bmi || '-'}</p>
                     </div>
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Tekanan Darah</p>
-                      <p className="text-sm font-bold text-slate-800">{selectedScreening.bloodPressure || '-'}</p>
+                      <p className="text-sm font-bold text-slate-800">
+                        {selectedScreening.systolicBP !== undefined && selectedScreening.diastolicBP !== undefined
+                          ? `${selectedScreening.systolicBP}/${selectedScreening.diastolicBP}`
+                          : (selectedScreening.bloodPressure || '-')}
+                      </p>
+                      {selectedScreening.bpCategory && (
+                        <Badge variant="outline" className="mt-1 text-[10px] font-bold text-slate-600 border-slate-200 bg-slate-50">
+                          {selectedScreening.bpCategory}
+                        </Badge>
+                      )}
+                      {selectedScreening.bloodPressure && (selectedScreening.systolicBP !== undefined || selectedScreening.diastolicBP !== undefined) && (
+                        <p className="text-[10px] text-slate-400 mt-1">Data lama: {selectedScreening.bloodPressure}</p>
+                      )}
                     </div>
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Gula Darah</p>
@@ -1522,7 +1867,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                     </div>
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm col-span-2">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Kadar HB Darah</p>
-                      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
                         <p className="text-sm font-bold text-slate-800">{selectedScreening.hbLevel || '-'} mg/dL</p>
                         {selectedScreening.hbInterpretation && (
                           <Badge variant="outline" className={`text-[10px] font-bold ${
@@ -1540,7 +1885,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                   <h4 className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
                     <Eye className="w-4 h-4" /> Indera & Gigi
                   </h4>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Mata (L/R)</p>
                       <p className="text-sm font-bold text-slate-800">{selectedScreening.visionLeft}/{selectedScreening.visionRight}</p>
@@ -1561,12 +1906,12 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <div className="space-y-4">
                   <h4 className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
                     <ShieldAlert className="w-4 h-4" /> Skrining Penyakit & Jiwa
                   </h4>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">TBC</p>
                       <p className="text-sm font-bold text-slate-800">{selectedScreening.tbcScreening || '-'}</p>
@@ -1586,7 +1931,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                   <h4 className="text-xs font-bold text-primary uppercase tracking-widest flex items-center gap-2">
                     <Baby className="w-4 h-4" /> Khusus & Reproduksi
                   </h4>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                       <p className="text-[10px] text-slate-400 font-bold uppercase">Reproduksi</p>
                       <p className="text-sm font-bold text-slate-800">{selectedScreening.reproductiveHealth || '-'}</p>
@@ -1605,6 +1950,12 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                       <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm col-span-2">
                         <p className="text-[10px] text-slate-400 font-bold uppercase">Anemia (Remaja Putri)</p>
                         <p className="text-sm font-bold text-slate-800">{selectedScreening.anemiaStatus || '-'}</p>
+                      </div>
+                    )}
+                    {selectedScreening.studentGender === 'P' && (
+                      <div className="p-3 bg-white rounded-xl border border-slate-100 shadow-sm col-span-2">
+                        <p className="text-[10px] text-slate-400 font-bold uppercase">Menstruasi</p>
+                        <p className="text-sm font-bold text-slate-800">{selectedScreening.menstruasi || '-'}</p>
                       </div>
                     )}
                   </div>
@@ -1627,7 +1978,7 @@ export function Screenings({ academicYear: currentAcademicYear, currentUser }: S
                       {selectedScreening.referralStatus === 'completed' ? 'Selesai' : selectedScreening.referralStatus === 'cancelled' ? 'Dibatalkan' : 'Menunggu'}
                     </Badge>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <p className="text-[10px] text-rose-400 font-bold uppercase">Tujuan</p>
                       <p className="text-sm font-bold text-rose-900">{selectedScreening.referralDestination}</p>

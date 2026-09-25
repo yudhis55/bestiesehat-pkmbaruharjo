@@ -56,9 +56,13 @@ export interface Screening {
   // Gigi & Mulut
   dentalCaries?: string;
   dentalMouthHealth?: string;
-  
+  cariesCount?: number;
+
   // Fisik & Penyakit
   bloodPressure?: string;
+  systolicBP?: number;
+  diastolicBP?: number;
+  bpCategory?: string;
   bloodSugar?: string;
   tbcScreening?: string;
   hepatitisB?: string;
@@ -69,6 +73,7 @@ export interface Screening {
   
   // Khusus & Reproduksi
   reproductiveHealth?: string;
+  menstruasi?: 'Sudah' | 'Belum';
   smokingStatus?: string;
   immunizationHistory?: string; // Khusus Kelas 1 SD
   anemiaStatus?: string; // Khusus Remaja Putri
@@ -98,8 +103,41 @@ export interface TTDCompliance {
   createdBy: string;
 }
 
-export interface Report {
+// Dokumentasi foto TTD: level SEKOLAH (school + date only, tanpa student
+// link). studentId legacy opsional (kolom student_id nullable sejak 0009,
+// tidak lagi ditulis/dibaca code). Mirror snake_case di
+// public.ttd_documentations (0008/0009); file biner di bucket privat
+// `ttd-docs`, DB hanya menyimpan photo_path.
+export interface TTDDocumentation {
   id: string;
+  studentId?: string | null;
+  schoolId: string;
+  academicYear: string;
+  photoPath: string;
+  takenAt: string;
+  createdBy: string;
+  // Snapshot nama pengunggah saat upload (0012 `created_by_name`). Nullable:
+  // baris pra-0012 = null/undefined -> UI fallback ke map/uploaderLabel lama.
+  createdByName?: string | null;
+}
+
+// Kustomisasi tanggal slot mingguan TTD: SATU baris = SATU slot yang
+// dikustomisasi (school + TA + bulan + pekan). Default Jumat dihitung
+// client-side (fridayDefaultsForMonth) dan TIDAK PERNAH disimpan — tanpa
+// baris = fallback ke Jumat default. Mirror snake_case di
+// public.ttd_slot_dates (0010); UNIQUE(school_id, academic_year, month,
+// week_index) sehingga upsert per slot idempoten.
+export interface TTDSlotDate {
+  id: string;
+  schoolId: string;
+  academicYear: string;
+  month: number;
+  weekIndex: number;
+  slotDate: string;
+  createdBy: string;
+}
+
+export interface Report {  id: string;
   schoolId: string;
   schoolName: string;
   academicYear: string;
