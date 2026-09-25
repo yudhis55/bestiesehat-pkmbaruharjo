@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Plus, Search, Edit, Trash2 } from 'lucide-react';
+import { Plus, Search, Edit, Trash2, Eye, EyeOff } from 'lucide-react';
 import {
   Table,
   TableBody,
@@ -63,6 +63,49 @@ function schoolRowToSchool(row: SchoolRow): School {
   };
 }
 
+// Membaca pesan spesifik dari body respons Edge Function (create-user /
+// set-password). FunctionsHttpError.context adalah Response, jadi bodinya
+// harus dibaca async. Kembalikan null bila tidak ada pesan yang berguna.
+async function readEdgeMessage(err: unknown): Promise<string | null> {
+  if (!(err instanceof FunctionsHttpError)) return null;
+  const ctx = (err as { context?: unknown }).context;
+  if (!ctx || typeof ctx !== 'object') return null;
+  const pickFromObject = (obj: Record<string, unknown>): string | null => {
+    const candidates = [obj['error'], obj['message'], obj['msg'], obj['error_description']];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+    return null;
+  };
+  try {
+    const res = ctx as Response;
+    if (typeof res.text === 'function') {
+      let raw = '';
+      try {
+        raw = await res.clone().text();
+      } catch {
+        raw = await res.text();
+      }
+      raw = (raw ?? '').trim();
+      if (!raw) return null;
+      if (raw.startsWith('<')) return null;
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          return pickFromObject(parsed as Record<string, unknown>);
+        }
+        if (typeof parsed === 'string' && parsed.trim()) return parsed.trim();
+      } catch {
+        // Bukan JSON — pakai teks mentah bila wajar.
+      }
+      return raw.length <= 300 ? raw : null;
+    }
+    return pickFromObject(ctx as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
 export function Users({ academicYear: _academicYear }: UsersProps) {
   const [users, setUsers] = useState<User[]>([]);
   const [schools, setSchools] = useState<School[]>([]);
@@ -78,6 +121,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
   const [newName, setNewName] = useState('');
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [showNewPassword, setShowNewPassword] = useState(false);
   const [newRole, setNewRole] = useState<'koordinator' | 'admin'>('koordinator');
   const [newSchoolId, setNewSchoolId] = useState('');
   const [newIsActive, setNewIsActive] = useState('aktif');
@@ -133,6 +177,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
     setNewName('');
     setNewUsername('');
     setNewPassword('');
+    setShowNewPassword(false);
     setNewRole('koordinator');
     setNewSchoolId('');
     setNewIsActive('aktif');
@@ -144,6 +189,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
     setNewName(user.name);
     setNewUsername(user.username);
     setNewPassword('');
+    setShowNewPassword(false);
     setNewRole(user.role);
     setNewSchoolId(user.schoolId ?? '');
     setNewIsActive(user.isActive ? 'aktif' : 'nonaktif');
@@ -156,15 +202,24 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
       toast.error("Mohon isi nama dan username");
       return;
     }
-    if (newRole === 'koordinator' && !newSchoolId) {
-      toast.error("Mohon pilih sekolah ampuan");
+    const trimmedUsername = newUsername.trim();
+    if (/\s/.test(trimmedUsername)) {
+      toast.error("Username tidak boleh mengandung spasi. Gunakan huruf, angka, titik atau underscore.");
+      return;
+    }
+    if (trimmedUsername.length < 3) {
+      toast.error("Username minimal 3 karakter.");
       return;
     }
     const duplicate = users.find(
-      (u) => u.username.toLowerCase() === newUsername.trim().toLowerCase() && u.id !== selectedUser?.id
+      (u) => u.username.toLowerCase() === trimmedUsername.toLowerCase() && u.id !== selectedUser?.id
     );
     if (duplicate) {
       toast.error("Username sudah digunakan");
+      return;
+    }
+    if (newRole === 'koordinator' && !newSchoolId) {
+      toast.error("Mohon pilih sekolah ampuan");
       return;
     }
 
@@ -176,7 +231,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
       }
       const wantPasswordReset = newPassword !== '';
       if (wantPasswordReset && newPassword.length < 6) {
-        toast.error("Kata sandi baru minimal 6 karakter");
+        toast.error("Kata sandi minimal 6 karakter.");
         return;
       }
       setIsSaving(true);
@@ -211,7 +266,10 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
           });
           if (pwError) {
             const status = pwError instanceof FunctionsHttpError ? pwError.context.status : 0;
-            if (status === 401) {
+            const detail = await readEdgeMessage(pwError);
+            if (detail) {
+              toast.error(`Profil diperbarui, tetapi kata sandi gagal diubah. ${detail}`);
+            } else if (status === 401) {
               toast.error('Sesi tidak valid. Profil diperbarui, tetapi kata sandi gagal diubah. Silakan login ulang.');
             } else if (status === 403) {
               toast.error('Hanya admin yang dapat mereset kata sandi. Profil tetap diperbarui.');
@@ -240,6 +298,10 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
         toast.error("Mohon isi kata sandi");
         return;
       }
+      if (newPassword.length < 6) {
+        toast.error("Kata sandi minimal 6 karakter.");
+        return;
+      }
       setIsSaving(true);
       try {
         // FASE PENUH: pembuatan akun dilakukan server-side oleh Edge Function
@@ -258,7 +320,10 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
         });
         if (error) {
           const status = error instanceof FunctionsHttpError ? error.context.status : 0;
-          if (status === 400) {
+          const detail = await readEdgeMessage(error);
+          if (detail) {
+            toast.error(`Gagal membuat akun. ${detail}`);
+          } else if (status === 400) {
             toast.error('Data akun tidak valid. Periksa kembali isian Anda.');
           } else if (status === 401) {
             toast.error('Sesi tidak valid. Silakan login ulang.');
@@ -335,9 +400,9 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Data Pengguna</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {_academicYear}
@@ -351,7 +416,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
               <Plus className="w-5 h-5" /> Tambah Koordinator
             </Button>
           </DialogTrigger>
-          <DialogContent className="rounded-3xl border-none shadow-2xl">
+          <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
             <DialogHeader>
               <DialogTitle className="text-2xl font-bold text-primary">
                 {selectedUser ? 'Ubah Koordinator' : 'Tambah Koordinator Baru'}
@@ -381,15 +446,27 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="password" className="font-bold text-slate-700">Kata Sandi</Label>
-                <Input
-                  id="password"
-                  type="password"
-                  placeholder={selectedUser ? "Kosongkan jika tidak diubah" : "Kata sandi akun"}
-                  className="rounded-xl border-slate-200"
+                <div className="relative">
+                  <Input
+                    id="password"
+                    type={showNewPassword ? 'text' : 'password'}
+                    placeholder={selectedUser ? "Kosongkan jika tidak diubah" : "Kata sandi akun"}
+                    className="rounded-xl border-slate-200 pr-12"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   disabled={isSaving}
-                />
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => setShowNewPassword((v) => !v)}
+                    aria-label={showNewPassword ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi'}
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-8 w-8 rounded-xl text-slate-400 hover:text-slate-600"
+                  >
+                    {showNewPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </Button>
+                </div>
                 {selectedUser && (
                   <p className="text-xs text-muted-foreground font-medium">
                     Kosongkan jika tidak diubah; isi untuk mereset kata sandi akun ini (min 6 karakter).
@@ -456,7 +533,8 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
       </div>
 
       <div className="border-none rounded-2xl bg-white/50 backdrop-blur-sm shadow-sm overflow-hidden">
-        <Table>
+        <div className="overflow-x-auto">
+        <Table className="min-w-[640px]">
           <TableHeader className="bg-slate-50/50">
             <TableRow className="hover:bg-transparent border-slate-100">
               <TableHead className="font-bold text-muted-foreground uppercase tracking-wider text-[10px] py-4">Nama</TableHead>
@@ -528,6 +606,7 @@ export function Users({ academicYear: _academicYear }: UsersProps) {
             )}
           </TableBody>
         </Table>
+        </div>
       </div>
       <ConfirmDeleteDialog
         open={deleteTarget !== null}

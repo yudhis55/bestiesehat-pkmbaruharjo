@@ -262,9 +262,9 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Data Sekolah</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {currentAcademicYear}
@@ -278,7 +278,7 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
               <Plus className="w-5 h-5" /> Tambah Sekolah
             </Button>
           </DialogTrigger>
-          <DialogContent className="rounded-3xl border-none shadow-2xl">
+          <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
             <DialogHeader>
               <DialogTitle className="text-2xl font-bold text-primary">{editingId ? 'Edit Sekolah' : 'Tambah Sekolah Baru'}</DialogTitle>
               <DialogDescription className="font-medium">{editingId ? 'Perbarui detail sekolah binaan.' : 'Masukkan detail sekolah binaan baru.'}</DialogDescription>
@@ -348,7 +348,8 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
       </div>
 
       <div className="border-none rounded-2xl bg-white/50 backdrop-blur-sm shadow-sm overflow-hidden">
-        <Table>
+        <div className="overflow-x-auto">
+        <Table className="min-w-[640px]">
           <TableHeader className="bg-slate-50/50">
             <TableRow className="hover:bg-transparent border-slate-100">
               <TableHead className="font-bold text-muted-foreground uppercase tracking-wider text-[10px] py-4">Nama Sekolah</TableHead>
@@ -402,6 +403,7 @@ export function Schools({ academicYear: currentAcademicYear }: SchoolsProps) {
             ))}
           </TableBody>
         </Table>
+        </div>
       </div>
       <ConfirmDeleteDialog
         open={deleteTarget !== null}

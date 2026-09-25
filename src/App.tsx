@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Suspense, lazy, useEffect, useState, type ReactNode } from 'react';
+import { Suspense, lazy, useEffect, useRef, useState, type ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useNavigate } from 'react-router';
 import { Sidebar } from '@/components/Sidebar';
 import { Auth } from '@/components/Auth';
@@ -33,6 +33,42 @@ function TabFallback() {
   );
 }
 
+// Tahun ajaran: fallback instan, dioverride cache lokal lalu sync DB.
+// Profil segar tanpa cache ditahan year gate (TabFallback) sampai sync selesai.
+const ACTIVE_YEAR_KEY = 'uks_active_year';
+const FALLBACK_YEAR = '2024/2025';
+
+function isValidYearLabel(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}\/\d{4}$/.test(value.trim());
+}
+
+function readCachedActiveYear(): string {
+  try {
+    const cached = localStorage.getItem(ACTIVE_YEAR_KEY);
+    if (isValidYearLabel(cached)) return (cached as string).trim();
+  } catch {
+    // localStorage tidak tersedia — pakai fallback.
+  }
+  return FALLBACK_YEAR;
+}
+
+function persistActiveYear(label: string) {
+  try {
+    localStorage.setItem(ACTIVE_YEAR_KEY, label);
+  } catch {
+    // abaikan kegagalan persist (mis. mode privat) — state tetap jalan.
+  }
+}
+
+// Cache hit = fast path (gate langsung lolos); cache kosong = gate menahan first paint.
+function hasCachedActiveYear(): boolean {
+  try {
+    return isValidYearLabel(localStorage.getItem(ACTIVE_YEAR_KEY));
+  } catch {
+    return false;
+  }
+}
+
 // Guard peran: koordinator (dan non-admin untuk /pengguna) dialihkan ke /pemeriksaan.
 function RequireRole({ allow, children }: { allow: boolean; children: ReactNode }) {
   if (!allow) {
@@ -43,8 +79,15 @@ function RequireRole({ allow, children }: { allow: boolean; children: ReactNode 
 
 function Shell() {
   const [currentUser, setCurrentUser] = useState<User | null>(() => getSession());
-  const [academicYear, setAcademicYear] = useState('2024/2025');
+  const [academicYear, setAcademicYear] = useState(() => readCachedActiveYear());
+  const [yearReady, setYearReady] = useState(() => hasCachedActiveYear());
   const navigate = useNavigate();
+
+  // Setter yang sekaligus persist ke cache lokal agar login berikutnya langsung benar.
+  const handleAcademicYearChange = (label: string) => {
+    setAcademicYear(label);
+    if (isValidYearLabel(label)) persistActiveYear(label.trim());
+  };
 
   // Verifikasi cache sesi lokal terhadap sesi Supabase saat aplikasi dimuat.
   useEffect(() => {
@@ -83,33 +126,105 @@ function Shell() {
     };
   }, []);
 
-  // Tahun ajaran aktif: '2024/2025' di atas hanya fallback instan,
-  // lalu sinkron ke baris is_active=true di tabel academic_years.
+  // Ref cermin academicYear untuk listener auth (hindari stale closure tanpa re-subscribe).
+  const academicYearRef = useRef(academicYear);
   useEffect(() => {
+    academicYearRef.current = academicYear;
+  }, [academicYear]);
+
+  // Tahun ajaran aktif: state diawali cache lokal (uks_active_year),
+  // lalu sinkron ke baris is_active=true di tabel academic_years + persist cache.
+  // Sync HANYA berjalan saat sesi terautentikasi (currentUser non-null): query
+  // sebelum sesi Supabase tegak kena RLS (0 baris → 406) dan membuat fallback lengket.
+  // Tanpa cache, gate (yearReady) menahan first paint sampai sync selesai —
+  // children tidak pernah query dengan tahun fallback yang basi.
+  // Timeout 3 dtk melepas gate agar DB hiccup tidak menggantung aplikasi.
+  useEffect(() => {
+    if (!currentUser) return;
     let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (!cancelled) setYearReady(true);
+    }, 3000);
     const loadActiveYear = async () => {
-      const { data, error } = await supabase
-        .from('academic_years')
-        .select('label')
-        .eq('is_active', true)
-        .limit(1)
-        .single();
-      if (cancelled || error || !data) return;
-      const label = (data as { label: unknown }).label;
-      if (typeof label === 'string' && label.trim().length > 0) {
-        setAcademicYear(label);
+      try {
+        const { data, error } = await supabase
+          .from('academic_years')
+          .select('label')
+          .eq('is_active', true)
+          .limit(1)
+          .single();
+        if (cancelled || error || !data) return;
+        const label = (data as { label: unknown }).label;
+        if (isValidYearLabel(label)) {
+          const trimmed = label.trim();
+          setAcademicYear(trimmed);
+          persistActiveYear(trimmed);
+        }
+      } catch {
+        // Gagal jaringan — gate dilepas oleh finally/timeout, state tetap fallback.
+      } finally {
+        if (!cancelled) {
+          window.clearTimeout(timer);
+          setYearReady(true);
+        }
       }
     };
     void loadActiveYear();
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [currentUser]);
+
+  // Retry event-driven untuk race login-segar: sync pertama bisa lolos sebelum
+  // sesi Supabase tegak (RLS → fallback lengket). Saat SIGNED_IN/TOKEN_REFRESHED
+  // tiba dan tahun masih fallback/invalid, sync ulang sekali. Tanpa polling.
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+      if (event !== 'SIGNED_IN' && event !== 'TOKEN_REFRESHED') return;
+      const current = academicYearRef.current;
+      if (isValidYearLabel(current) && current.trim() !== FALLBACK_YEAR) return;
+      void (async () => {
+        try {
+          const { data, error } = await supabase
+            .from('academic_years')
+            .select('label')
+            .eq('is_active', true)
+            .limit(1)
+            .single();
+          if (error || !data) return;
+          const label = (data as { label: unknown }).label;
+          if (isValidYearLabel(label)) {
+            const trimmed = label.trim();
+            setAcademicYear(trimmed);
+            persistActiveYear(trimmed);
+          }
+        } catch {
+          // Gagal jaringan — gate dilepas oleh finally, state tetap fallback.
+        } finally {
+          setYearReady(true);
+        }
+      })();
+    });
+    return () => {
+      subscription.unsubscribe();
     };
   }, []);
+
+  // Year gate: hanya untuk sesi login; layar Auth tidak ditahan sync tahun.
+  if (currentUser && !yearReady) {
+    return (
+      <div className="container mx-auto p-4 md:p-8 max-w-7xl space-y-6">
+        <TabFallback />
+        <Toaster />
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
       <>
-        <Auth onLogin={(u) => { setCurrentUser(u); navigate(u.role === 'koordinator' ? '/pemeriksaan' : '/dashboard'); }} />
+        <Auth onLogin={(u) => { setCurrentUser(u); navigate('/dashboard'); }} />
         <Toaster />
       </>
     );
@@ -142,7 +257,7 @@ function Shell() {
 
       <Sidebar
         academicYear={academicYear}
-        setAcademicYear={setAcademicYear}
+        setAcademicYear={handleAcademicYearChange}
         onLogout={handleLogout}
         currentUser={currentUser}
       />
@@ -186,7 +301,7 @@ function Shell() {
                 path="/tahun-ajaran"
                 element={
                   <RequireRole allow={isAdmin}>
-                    <AcademicYears academicYear={academicYear} onActiveYearChange={setAcademicYear} />
+                    <AcademicYears academicYear={academicYear} onActiveYearChange={handleAcademicYearChange} />
                   </RequireRole>
                 }
               />

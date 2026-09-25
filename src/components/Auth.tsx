@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { BookOpen, Pencil, GraduationCap, School, Backpack } from 'lucide-react';
+import { BookOpen, Pencil, GraduationCap, School, Backpack, Eye, EyeOff } from 'lucide-react';
 import { AuthLogosBanner } from '@/components/HeaderLogos';
 import logoBestieSehat from '@/assets/images/logo-bestiesehat.png';
 import { toast } from 'sonner';
@@ -18,6 +18,7 @@ interface AuthProps {
 export function Auth({ onLogin }: AuthProps) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e: FormEvent) => {
@@ -113,15 +114,27 @@ export function Auth({ onLogin }: AuthProps) {
             </div>
             <div className="space-y-2 text-left">
               <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Masukkan password"
-                autoComplete="current-password"
-                className="h-12 rounded-xl"
-              />
+              <div className="relative">
+                <Input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Masukkan password"
+                  autoComplete="current-password"
+                  className="h-12 rounded-xl pr-12"
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setShowPassword((v) => !v)}
+                  aria-label={showPassword ? 'Sembunyikan password' : 'Tampilkan password'}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 h-10 w-10 rounded-xl text-slate-400 hover:text-slate-600"
+                >
+                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                </Button>
+              </div>
             </div>
             <Button type="submit" disabled={isLoading} className="w-full h-14 text-lg font-black rounded-2xl shadow-xl shadow-primary/30 hover:scale-[1.02] transition-all active:scale-95 bg-primary hover:bg-primary/90">
               {isLoading ? 'Memeriksa...' : 'Masuk'}

@@ -346,7 +346,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Laporan UKS</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {currentAcademicYear}
@@ -354,7 +354,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
           </div>
           <p className="text-muted-foreground font-medium">Kelola dan verifikasi laporan bulanan dari sekolah.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button
             className="gap-2 h-11 px-5 rounded-xl shadow-lg shadow-primary/20"
             onClick={() => { resetAddForm(); setAddDialogOpen(true); }}
@@ -374,7 +374,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
         </div>
       </div>
 
-      <div className="flex gap-4">
+      <div className="flex flex-wrap gap-4">
         <Select value={selectedMonth} onValueChange={setSelectedMonth}>
           <SelectTrigger className="w-48 h-11 rounded-xl border-slate-200 bg-white shadow-sm">
             <CalendarIcon className="w-4 h-4 mr-2 text-muted-foreground" />
@@ -511,7 +511,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
                     {report.status === 'approved' ? 'Disetujui' : 'Menunggu'}
                   </Badge>
                 </div>
-                <div className="grid grid-cols-2 gap-3 mt-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-6">
                   <Button 
                     variant="outline" 
                     size="sm" 
@@ -541,7 +541,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
 
       {/* Verification Confirmation Dialog */}
       <Dialog open={verifyDialogOpen} onOpenChange={setVerifyDialogOpen}>
-        <DialogContent className="rounded-3xl border-none shadow-2xl max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl max-w-md sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Konfirmasi Verifikasi</DialogTitle>
             <DialogDescription className="font-medium">
@@ -565,9 +565,9 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
 
       {/* Report Detail Dialog */}
       <Dialog open={detailDialogOpen} onOpenChange={setDetailDialogOpen}>
-        <DialogContent className="rounded-3xl border-none shadow-2xl max-w-2xl">
+        <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl max-w-2xl sm:max-w-2xl">
           <DialogHeader>
-            <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
               <div>
                 <DialogTitle className="text-2xl font-bold text-primary">Detail Laporan UKS</DialogTitle>
                 <DialogDescription className="font-medium">
@@ -598,7 +598,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1 p-4 bg-slate-50 rounded-2xl border border-slate-100">
                   <p className="text-xs font-bold text-slate-400 uppercase tracking-wider">Nama Sekolah</p>
                   <p className="text-lg font-extrabold text-slate-800">{selectedReportForDetail.schoolName}</p>
@@ -609,7 +609,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="text-center p-4 bg-primary/5 rounded-2xl border border-primary/10">
                   <p className="text-xs font-bold text-primary uppercase tracking-wider">Total Siswa</p>
                   <p className="text-2xl font-black text-primary">{selectedReportForDetail.totalStudents}</p>
@@ -626,7 +626,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
 
               <div className="space-y-3">
                 <h4 className="text-sm font-bold text-slate-800 px-1">Ringkasan Data (Simulasi)</h4>
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="flex items-center justify-between p-3 bg-white rounded-xl border border-slate-100 shadow-sm">
                     <span className="text-sm text-slate-600">Siswa Laki-laki</span>
                     <span className="text-sm font-bold text-slate-800">{Math.floor(selectedReportForDetail.totalStudents * 0.45)}</span>
@@ -667,7 +667,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
 
       {/* Tambah Laporan Dialog */}
       <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
-        <DialogContent className="rounded-3xl border-none shadow-2xl max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl max-w-md sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Tambah Laporan</DialogTitle>
             <DialogDescription className="font-medium">
@@ -688,7 +688,7 @@ export function Reports({ academicYear: currentAcademicYear }: ReportsProps) {
                 </SelectContent>
               </Select>
             </div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="report-month" className="font-bold text-slate-700">Bulan</Label>
                 <Select value={newMonth} onValueChange={setNewMonth}>

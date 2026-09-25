@@ -28,7 +28,7 @@ export function ConfirmDeleteDialog({
 }: ConfirmDeleteDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md rounded-3xl border-none shadow-2xl">
+      <DialogContent className="max-h-[90vh] overflow-y-auto max-w-md sm:max-w-md rounded-3xl border-none shadow-2xl">
         <DialogHeader>
           <div className="flex items-center gap-4">
             <div className="p-3 rounded-2xl bg-rose-50 border border-rose-100 shrink-0">

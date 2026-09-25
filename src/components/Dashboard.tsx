@@ -86,13 +86,18 @@ interface ScreeningRow {
   hearing_right: string | null;
   dental_caries: string | null;
   dental_mouth_health: string | null;
+  caries_count: number | null;
   blood_pressure: string | null;
+  systolic_bp: number | null;
+  diastolic_bp: number | null;
+  bp_category: string | null;
   blood_sugar: string | null;
   tbc_screening: string | null;
   hepatitis_b: string | null;
   hepatitis_c: string | null;
   mental_health_status: string | null;
   reproductive_health: string | null;
+  menstruasi: 'Sudah' | 'Belum' | null;
   smoking_status: string | null;
   immunization_history: string | null;
   anemia_status: string | null;
@@ -157,13 +162,18 @@ function screeningRowToScreening(row: ScreeningRow): Screening {
     hearingRight: row.hearing_right ?? undefined,
     dentalCaries: row.dental_caries ?? undefined,
     dentalMouthHealth: row.dental_mouth_health ?? undefined,
+    cariesCount: row.caries_count ?? undefined,
     bloodPressure: row.blood_pressure ?? undefined,
+    systolicBP: row.systolic_bp ?? undefined,
+    diastolicBP: row.diastolic_bp ?? undefined,
+    bpCategory: row.bp_category ?? undefined,
     bloodSugar: row.blood_sugar ?? undefined,
     tbcScreening: row.tbc_screening ?? undefined,
     hepatitisB: row.hepatitis_b ?? undefined,
     hepatitisC: row.hepatitis_c ?? undefined,
     mentalHealthStatus: row.mental_health_status ?? undefined,
     reproductiveHealth: row.reproductive_health ?? undefined,
+    menstruasi: row.menstruasi ?? undefined,
     smokingStatus: row.smoking_status ?? undefined,
     immunizationHistory: row.immunization_history ?? undefined,
     anemiaStatus: row.anemia_status ?? undefined,
@@ -285,6 +295,7 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
 
       return {
         name: (sch.name.match(/^(SDN|SMPN|SMAN)\s+\d+/i)?.[0] ?? sch.name).substring(0, 12),
+        fullName: sch.name,
         screened: screenedSiswaSkh,
         total: totalSiswaSkh || 10
       };
@@ -300,6 +311,7 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
       const inClass = visibleStudents.filter(st => st.class === cls);
       return {
         name: `Kelas ${cls}`.substring(0, 12),
+        fullName: `Kelas ${cls}`,
         screened: inClass.filter(st => screenedIds.has(st.id)).length,
         total: inClass.length || 10,
       };
@@ -334,9 +346,9 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
 
   return (
     <div className="space-y-8">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Dashboard</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {academicYear}
@@ -347,7 +359,7 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
         {!isKoordinator && (
           <Select value={adminSchoolId} onValueChange={setAdminSchoolId}>
             <SelectTrigger className="w-56 h-11 rounded-xl border-slate-200 bg-white/50 font-bold text-slate-600">
-              <SelectValue placeholder="Semua Sekolah">{adminSchoolId === 'all' ? undefined : (schools.find((s) => s.id === adminSchoolId)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
+              <SelectValue placeholder="Semua Sekolah">{adminSchoolId === 'all' ? 'Semua Sekolah' : (schools.find((s) => s.id === adminSchoolId)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
             </SelectTrigger>
             <SelectContent className="rounded-xl">
               <SelectItem value="all">Semua Sekolah</SelectItem>
@@ -434,13 +446,15 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
           <CardContent className="pl-2">
             <div className="h-[350px]">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={barData}>
+                <BarChart data={barData} margin={{ top: 8, right: 8, left: 0, bottom: 70 }}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(0.9 0.03 160)" />
                   <XAxis 
                     dataKey="name" 
                     axisLine={false} 
                     tickLine={false} 
-                    tick={{ fill: 'oklch(0.5 0.05 160)', fontSize: 12, fontWeight: 500 }}
+                    interval={0}
+                    height={70}
+                    tick={{ fill: 'oklch(0.5 0.05 160)', fontSize: 11, fontWeight: 500, angle: -25, textAnchor: 'end' }}
                   />
                   <YAxis 
                     axisLine={false} 
@@ -450,6 +464,8 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
                   <Tooltip 
                     cursor={{ fill: 'oklch(0.95 0.02 160)' }}
                     contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                    labelFormatter={(_label, payload) => (payload?.[0]?.payload?.fullName as string | undefined) ?? String(_label)}
+                    formatter={(value, _name, props) => [value, (props?.payload?.fullName as string | undefined) ?? 'Diperiksa']}
                   />
                   <Bar dataKey="screened" fill="oklch(0.6 0.18 160)" radius={[6, 6, 0, 0]} barSize={40} />
                 </BarChart>
@@ -486,7 +502,7 @@ export function Dashboard({ academicYear, currentUser }: DashboardProps) {
                 </PieChart>
               </ResponsiveContainer>
             </div>
-            <div className="mt-6 grid grid-cols-2 gap-3">
+            <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 gap-3">
               {bmiDistribution.map((item) => (
                 <div key={item.name} className="flex flex-col p-3 rounded-xl bg-slate-50/50 border border-slate-100">
                   <div className="flex items-center gap-2 mb-1">

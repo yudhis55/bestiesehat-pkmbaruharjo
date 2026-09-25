@@ -663,9 +663,9 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
 
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <h2 className="text-4xl font-extrabold tracking-tight text-primary">Data Siswa</h2>
             <Badge variant="outline" className="h-7 px-3 rounded-full border-primary/30 text-primary font-bold bg-primary/5">
               TA {currentAcademicYear}
@@ -673,14 +673,14 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
           </div>
           <p className="text-muted-foreground font-medium">Daftar siswa dari seluruh sekolah binaan.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Dialog open={isImportOpen} onOpenChange={setIsImportOpen}>
             <DialogTrigger asChild>
               <Button variant="outline" className="gap-2 h-11 px-5 rounded-xl border-slate-200 hover:bg-primary/5 hover:text-primary transition-all">
                 <Upload className="w-4 h-4" /> Import Excel
               </Button>
             </DialogTrigger>
-            <DialogContent className="rounded-3xl border-none shadow-2xl">
+            <DialogContent className="max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
               <DialogHeader>
                 <DialogTitle className="text-2xl font-bold text-primary">Import Data Siswa</DialogTitle>
                 <DialogDescription className="font-medium">
@@ -725,13 +725,13 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                 <Plus className="w-4 h-4" /> Tambah Siswa
               </Button>
             </DialogTrigger>
-            <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
+            <DialogContent className="max-w-4xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
               <DialogHeader>
                 <DialogTitle className="text-2xl font-bold text-primary">Tambah Siswa Baru</DialogTitle>
                 <DialogDescription className="font-medium">Masukkan data diri siswa baru secara lengkap.</DialogDescription>
               </DialogHeader>
               <div className="grid gap-6 py-4">
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="s_school" className="font-bold text-slate-700">Nama Sekolah</Label>
                     <Select value={newSchoolId} onValueChange={setNewSchoolId}>
@@ -780,7 +780,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-4">
+<div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="grid gap-2">
                     <Label className="font-bold text-slate-700">Jenis Kelamin</Label>
                     <Select value={newGender} onValueChange={(v: 'L' | 'P') => setNewGender(v)}>
@@ -827,7 +827,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="grid gap-2">
                     <Label htmlFor="s_parent" className="font-bold text-slate-700">Nama Orang Tua</Label>
                     <Input 
@@ -852,7 +852,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
 
                 <div className="space-y-4">
                   <Label className="font-bold text-slate-800 border-b pb-1 block">Alamat Lengkap</Label>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="grid gap-2">
                       <Label htmlFor="addr_rt">RT</Label>
                       <Input id="addr_rt" placeholder="00" value={newRT} onChange={(e) => setNewRT(e.target.value)} className="rounded-xl" />
@@ -862,7 +862,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                       <Input id="addr_rw" placeholder="00" value={newRW} onChange={(e) => setNewRW(e.target.value)} className="rounded-xl" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="grid gap-2">
                       <Label htmlFor="addr_desa">Desa/Kelurahan</Label>
                       <Input id="addr_desa" placeholder="Nama desa" value={newDesa} onChange={(e) => setNewDesa(e.target.value)} className="rounded-xl" />
@@ -872,7 +872,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                       <Input id="addr_kec" placeholder="Nama kecamatan" value={newKecamatan} onChange={(e) => setNewKecamatan(e.target.value)} className="rounded-xl" />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div className="grid gap-2">
                       <Label htmlFor="addr_kab">Kabupaten/Kota</Label>
                       <Input id="addr_kab" placeholder="Nama kabupaten" value={newKabupaten} onChange={(e) => setNewKabupaten(e.target.value)} className="rounded-xl" />
@@ -906,7 +906,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
           <Select value={schoolFilter} onValueChange={setSchoolFilter}>
             <SelectTrigger>
               <Filter className="w-4 h-4 mr-2 text-muted-foreground" />
-              <SelectValue placeholder="Filter Sekolah">{schoolFilter === 'all' ? undefined : (schools.find((s) => s.id === schoolFilter)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
+              <SelectValue placeholder="Semua Sekolah">{schoolFilter === 'all' ? 'Semua Sekolah' : (schools.find((s) => s.id === schoolFilter)?.name ?? 'Sekolah tidak tersedia')}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">Semua Sekolah</SelectItem>
@@ -944,7 +944,8 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                 </h3>
               </div>
               <div className="border-none rounded-2xl bg-white/50 backdrop-blur-sm shadow-sm overflow-hidden">
-                <Table>
+                <div className="overflow-x-auto">
+                <Table className="min-w-[640px]">
                   <TableHeader className="bg-slate-50/50">
                     <TableRow className="hover:bg-transparent border-slate-100">
                       <TableHead className="font-bold text-muted-foreground uppercase tracking-wider text-[10px] py-4">Nama Siswa</TableHead>
@@ -972,7 +973,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                             </span>
                             {student.birthDate && (
                               <span className="text-[10px] text-muted-foreground">
-                                {new Date(student.birthDate).toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' })}
+                                {new Date(student.birthDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'numeric', year: 'numeric' })}
                               </span>
                             )}
                           </div>
@@ -1013,6 +1014,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                     ))}
                   </TableBody>
                 </Table>
+                </div>
               </div>
             </div>
           ))
@@ -1036,7 +1038,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
 
       {/* Detail Dialog */}
       <Dialog open={isDetailOpen} onOpenChange={setIsDetailOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
+        <DialogContent className="max-w-4xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Detail Siswa</DialogTitle>
             <DialogDescription className="font-medium">Informasi lengkap data diri siswa.</DialogDescription>
@@ -1055,7 +1057,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="space-y-1">
                   <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Sekolah</p>
                   <p className="text-sm font-bold text-slate-700">
@@ -1079,12 +1081,12 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                 <div className="space-y-1 col-span-2">
                   <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Tanggal Lahir</p>
                   <p className="text-sm font-bold text-slate-700">
-                    {selectedStudent.birthDate ? new Date(selectedStudent.birthDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : '-'}
+                    {selectedStudent.birthDate ? new Date(selectedStudent.birthDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'numeric', year: 'numeric' }) : '-'}
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-1">
                   <p className="text-[10px] uppercase tracking-wider font-bold text-slate-400">Nama Orang Tua</p>
                   <p className="text-sm font-bold text-slate-700">{selectedStudent.parentName}</p>
@@ -1114,13 +1116,13 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
 
       {/* Edit Student Dialog */}
       <Dialog open={isEditOpen} onOpenChange={(open) => { if (!open) { resetForm(); setEditingStudent(null); } setIsEditOpen(open); }}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
+        <DialogContent className="max-w-4xl sm:max-w-4xl max-h-[90vh] overflow-y-auto rounded-3xl border-none shadow-2xl">
           <DialogHeader>
             <DialogTitle className="text-2xl font-bold text-primary">Edit Data Siswa</DialogTitle>
             <DialogDescription className="font-medium">Perbarui data diri siswa. Umur akan terhitung otomatis saat tanggal lahir diubah.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-6 py-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="e_school" className="font-bold text-slate-700">Nama Sekolah</Label>
                 <Select value={newSchoolId} onValueChange={setNewSchoolId}>
@@ -1169,9 +1171,9 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
               </div>
             </div>
 
-            <div className="grid grid-cols-3 gap-4">
-              <div className="grid gap-2">
-                <Label className="font-bold text-slate-700">Jenis Kelamin</Label>
+<div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="grid gap-2">
+                  <Label className="font-bold text-slate-700">Jenis Kelamin</Label>
                 <Select value={newGender} onValueChange={(v: 'L' | 'P') => setNewGender(v)}>
                   <SelectTrigger className="rounded-xl border-slate-200">
                     <SelectValue placeholder="Pilih JK" />
@@ -1216,7 +1218,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="grid gap-2">
                 <Label htmlFor="e_parent" className="font-bold text-slate-700">Nama Orang Tua</Label>
                 <Input 
@@ -1241,7 +1243,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
 
             <div className="space-y-4">
               <Label className="font-bold text-slate-800 border-b pb-1 block">Alamat Lengkap</Label>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="e_addr_rt">RT</Label>
                   <Input id="e_addr_rt" placeholder="00" value={newRT} onChange={(e) => setNewRT(e.target.value)} className="rounded-xl" />
@@ -1251,7 +1253,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                   <Input id="e_addr_rw" placeholder="00" value={newRW} onChange={(e) => setNewRW(e.target.value)} className="rounded-xl" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="e_addr_desa">Desa/Kelurahan</Label>
                   <Input id="e_addr_desa" placeholder="Nama desa" value={newDesa} onChange={(e) => setNewDesa(e.target.value)} className="rounded-xl" />
@@ -1261,7 +1263,7 @@ export function Students({ academicYear: currentAcademicYear, currentUser }: Stu
                   <Input id="e_addr_kec" placeholder="Nama kecamatan" value={newKecamatan} onChange={(e) => setNewKecamatan(e.target.value)} className="rounded-xl" />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="e_addr_kab">Kabupaten/Kota</Label>
                   <Input id="e_addr_kab" placeholder="Nama kabupaten" value={newKabupaten} onChange={(e) => setNewKabupaten(e.target.value)} className="rounded-xl" />
